@@ -41,8 +41,9 @@ RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない�
               "!mute": ("mute", "ミュート（今後アーカイブしてよい。保護対象には効かない）"),
               "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）")}
 HELP = ("🛎️ **Concierge**（秘書）\n"
-        f"- 10分おきにメールを仕分け、毎朝 {BRIEF_TIME:%H:%M} にブリーフを届けます。今日・明日の締切や予定はすぐお知らせします\n"
-        "- `!brief` ブリーフ / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ郵便受けを見る\n"
+        f"- {POLL_MINUTES}分おきに郵便受けを見て、大学・就活・大事な相手からのメールはすぐ、それ以外は{sec.BATCH_WAIT_MIN}分ごとにまとめて仕分けます。"
+        f"毎朝 {BRIEF_TIME:%H:%M} にブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
+        "- `!brief` ブリーフ / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
         "- `!vip` `!mute` `!except` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`\n"
         f"- 自動アーカイブ: {'オン' if sec.AUTO_ARCHIVE else 'オフ（ラベルだけ付けています）'}")
 
@@ -93,11 +94,11 @@ async def react(message, emoji, remove=False):
 
 # ---- 郵便受け ----
 
-async def check_mail(report_empty=False):
+async def check_mail(report_empty=False, force=False):
     global _poll_failures
     async with _lock:
         try:
-            out = await asyncio.to_thread(sec.run_once)
+            out = await asyncio.to_thread(sec.run_once, force)
             _poll_failures = 0
         except Exception as e:  # noqa: BLE001
             _poll_failures += 1
@@ -115,6 +116,36 @@ async def check_mail(report_empty=False):
                         if n else "📭 新しいメールはありません")
 
 
+def usage_summary(days=1):
+    """!usage: Codex の使用量（state/codex_usage.jsonl）"""
+    import json as _json
+    from collections import defaultdict
+    from datetime import timedelta
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "codex_usage.jsonl")
+    since = (datetime.now(JST) - timedelta(days=days)).isoformat()
+    agg = defaultdict(lambda: [0, 0, 0])   # 回数, トークン, トークン不明の回数
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                r = _json.loads(ln)
+                if r["time"] < since:
+                    continue
+                a = agg[f"{r['task']}（{r['model']}）"]
+                a[0] += 1
+                if r.get("tokens") is None:
+                    a[2] += 1
+                else:
+                    a[1] += r["tokens"]
+    except FileNotFoundError:
+        pass
+    if not agg:
+        return f"📊 直近{days}日の Codex 使用はありません（Concierge 分）"
+    lines = [f"📊 **Codex 使用量**（直近{days}日・Concierge 分）"]
+    for k, (n, t, unknown) in sorted(agg.items()):
+        lines.append(f"- {k}: {n}回 / {t:,} トークン" + (f"（{unknown}回は不明）" if unknown else ""))
+    return "\n".join(lines)
+
+
 @tasks.loop(minutes=POLL_MINUTES)
 async def poll_mail():
     await check_mail()
@@ -129,7 +160,7 @@ async def before_poll():
 
 @tasks.loop(time=BRIEF_TIME)
 async def morning_brief():
-    await check_mail()   # 出す前に郵便受けを見ておく
+    await check_mail(force=True)   # 出す前に郵便受けを見て、溜まっている分も仕分けておく
     try:
         async with _lock:
             text = await asyncio.to_thread(build_brief, datetime.now(JST).date())
@@ -175,14 +206,17 @@ async def on_message(message):
         if cmd in RULE_KINDS:
             words[0] = cmd
             await message.reply(await asyncio.to_thread(rule_command, words), mention_author=False)
+        elif cmd == "!usage":
+            days = int(words[1]) if len(words) > 1 and words[1].isdigit() else 1
+            await message.reply(await asyncio.to_thread(usage_summary, days), mention_author=False)
         elif cmd == "!check":
             await react(message, "⏳")
-            await check_mail(report_empty=True)
+            await check_mail(report_empty=True, force=True)
             await react(message, "⏳", remove=True)
         elif cmd in ("!brief", "!mail", "!inbox"):
             await react(message, "⏳")
             if cmd == "!brief":
-                await check_mail()
+                await check_mail(force=True)
                 async with _lock:
                     text = await asyncio.to_thread(build_brief, log_date(datetime.now(JST)))
             elif cmd == "!mail":

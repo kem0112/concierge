@@ -13,7 +13,7 @@ from nc import WEEKDAYS, log
 CATEGORIES = ["要対応", "確認推奨", "参考", "広告・通知"]
 RANK = {c: i for i, c in enumerate(CATEGORIES)}  # 小さいほど重い
 PROTECTED_ACCOUNTS = {"大学", "就活"}
-BATCH = 8
+BATCH = 10
 
 
 def _glossary():
@@ -68,7 +68,7 @@ def ask_ai(mails, now):
                   .replace("{{GLOSSARY}}", _glossary())
                   .replace("{{MAILS}}", "\n\n".join(_mail_block(i + 1, m) for i, m in enumerate(chunk))))
         try:
-            out = run_codex(prompt, timeout=600)
+            out = run_codex(prompt, timeout=600, profile="light", task="mail_triage")
             m = re.search(r"\[.*\]", out, re.S)
             data = json.loads(m.group(0)) if m else []
         except Exception as e:  # noqa: BLE001

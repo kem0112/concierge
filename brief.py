@@ -64,7 +64,8 @@ def build_brief(today):
     text = None
     try:
         text = re.sub(r"^```(?:markdown|md)?\s*\n|\n```\s*$", "",
-                      run_codex(load_prompt("brief.md").replace("{{MATERIALS}}", materials), timeout=400).strip())
+                      run_codex(load_prompt("brief.md").replace("{{MATERIALS}}", materials), timeout=400,
+                                profile="main", task="brief").strip())
     except Exception as e:  # noqa: BLE001
         log(f"NG brief codex: {e!r}")
     if not text:

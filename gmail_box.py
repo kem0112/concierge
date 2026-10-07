@@ -18,7 +18,7 @@ GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "")
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MAX_FULL_SIZE = 1_500_000   # これより大きいメール（重い添付）はヘッダーだけ読む
-BODY_LIMIT = 1500
+BODY_LIMIT = 900   # 仕分けにはこれで足りる（長いほど Codex の使用量が増える）
 
 
 def imap_utf7(text):

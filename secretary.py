@@ -20,6 +20,9 @@ STATE_PATH = os.path.join(HERE, "state", "mail.json")
 KEEP_DAYS = 60
 FIRST_RUN_DAYS = 3
 AUTO_ARCHIVE = os.environ.get("CONCIERGE_AUTO_ARCHIVE", "0") == "1"
+# Codex に渡すのは、まとめて（呼び出し回数を減らす）。ただし大学・就活・VIP のメールが来ていたら、すぐ仕分ける
+BATCH_WAIT_MIN = int(os.environ.get("CONCIERGE_BATCH_WAIT_MIN", "60"))
+BATCH_MAX = 10
 SHELF_ICON = {"要対応": "🔴", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "未分類": "❓"}
 
 
@@ -35,6 +38,7 @@ def load_state():
     st.setdefault("last_uid", None)
     st.setdefault("last_brief", None)
     st.setdefault("records", {})
+    st.setdefault("pending_since", {})   # 見つけたがまだ仕分けていないメール: uid -> 初めて見た時刻
     return st
 
 
@@ -87,18 +91,26 @@ def urgent_reason(rec, ai, today):
 
 # ---- 1回分の処理 ----
 
-def run_once():
-    """未処理のメールを全部仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], held=[line], failed=n)"""
+def run_once(force=False):
+    """未処理のメールを仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], held=[line], failed=n, waiting=n)
+
+    force=False のときは、次のどれかに当たるまで Codex を呼ばずに待つ（郵便受けを見るだけなら Codex は使わない）:
+      - 大学・就活・VIP のメールがある（急ぎの可能性）
+      - いちばん古い未処理を見つけてから BATCH_WAIT_MIN 分たった
+      - 未処理が BATCH_MAX 通たまった
+    """
     st = load_state()
     rules = rules_mod.load()
     now = datetime.now(JST)
-    out = {"processed": [], "urgent": [], "held": [], "failed": 0}
+    out = {"processed": [], "urgent": [], "held": [], "failed": 0, "waiting": 0}
     with Mailbox() as mb:
         if st["uidvalidity"] != mb.uidvalidity or st["last_uid"] is None:
             # 初回、または受信トレイの番号が振り直されたとき: 直近数日分だけ処理する
             uids = mb.uids_since((now - timedelta(days=FIRST_RUN_DAYS)).date())
             st["uidvalidity"] = mb.uidvalidity
-            st["last_uid"] = mb.max_uid()
+            st["records"], st["pending_since"] = {}, {}
+            # まだ仕分けていない分は last_uid より後ろに残しておく（待っている間に取りこぼさないため）
+            st["last_uid"] = (min(uids) - 1) if uids else mb.max_uid()
             log(f"初期化: 直近{FIRST_RUN_DAYS}日の {len(uids)} 通を処理")
         else:
             uids = mb.uids_after(st["last_uid"])
@@ -108,6 +120,16 @@ def run_once():
             return out
 
         mails = [m for m in (mb.fetch(u) for u in uids) if m]
+        for m in mails:
+            st["pending_since"].setdefault(str(m["uid"]), now.isoformat())
+        oldest = min((datetime.fromisoformat(st["pending_since"][str(m["uid"])]) for m in mails), default=now)
+        urgent_possible = any(triage.decide(m, {"category": "参考", "confidence": "high"}, rules)["protected"]
+                              for m in mails)
+        if not (force or urgent_possible or len(mails) >= BATCH_MAX
+                or now - oldest >= timedelta(minutes=BATCH_WAIT_MIN)):
+            out["waiting"] = len(mails)
+            save_state(st)
+            return out
         ais = triage.ask_ai(mails, now)
         pairs = []
         for mail, ai in zip(mails, ais):
@@ -128,6 +150,7 @@ def run_once():
             if d["category"] == "未分類":
                 out["failed"] += 1
             st["records"][str(mail["uid"])] = rec
+            st["pending_since"].pop(str(mail["uid"]), None)
             st["last_uid"] = max(st["last_uid"] or 0, mail["uid"])
             out["processed"].append(rec)
             pairs.append((rec, ai))
