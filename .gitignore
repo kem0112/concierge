@@ -1,0 +1,12 @@
+# 鍵・資格情報（絶対にコミットしない）
+token.json
+client_secret*.json
+*.token.json
+env
+# その他
+.venv/
+__pycache__/
+codex-work/
+state/
+*.log
+.DS_Store
