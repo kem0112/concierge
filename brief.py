@@ -9,6 +9,7 @@ from ai import run_codex, load_prompt
 from nc import WEEKDAYS, log
 from recall_data import open_tasks_with_due, tasks_by_window, yesterday_summary, random_wish
 from weather import weather_text
+from gcal import calendar_text
 
 
 def _safe(fn, *a, default=None):
@@ -21,6 +22,14 @@ def _safe(fn, *a, default=None):
 
 def _lst(xs):
     return "\n".join(f"- {x}" for x in xs) if xs else "- なし"
+
+
+def _cal_section(title, day):
+    """カレンダー未設定なら空（見出しごと出さない）。取得に失敗したらそう書く"""
+    from gcal import enabled
+    if not enabled():
+        return ""
+    return f"## {title}\n{_safe(calendar_text, day) or '（取得できず）'}\n\n"
 
 
 def mail_materials():
@@ -60,7 +69,8 @@ def build_evening(today):
         f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
         f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n"
-        f"## 明日の天気\n{_safe(weather_text, tomorrow) or '（取得できず）'}\n"
+        f"## 明日の天気\n{_safe(weather_text, tomorrow) or '（取得できず）'}\n\n"
+        f"{_cal_section('明日の予定（Googleカレンダー）', tomorrow)}"
     )
     text = None
     try:
@@ -80,6 +90,7 @@ def build_brief(today):
     materials = (
         f"## 日付\n{today:%Y-%m-%d}（{WEEKDAYS[today.weekday()]}）\n\n"
         f"## 天気\n{_safe(weather_text, today) or '（取得できず）'}\n\n"
+        f"{_cal_section('今日の予定（Googleカレンダー）', today)}"
         f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n## 今週中（2〜7日後）が期日のタスク\n{_lst(tasks['week'])}\n\n"
         f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
