@@ -1,4 +1,4 @@
-"""Nextcloud（WebDAV）から Recall の記録を読む。Concierge は読むだけで、ob には書かない。"""
+"""Nextcloud（WebDAV）。Recall の記録は読むだけ。書くのは Concierge 専用のフォルダ（/ob/Concierge）だけ。"""
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -14,6 +14,8 @@ RECALL_ROOT = "/ob/Recall"
 JOURNAL_DIR = f"{RECALL_ROOT}/日記"
 TASKS_MD = f"{RECALL_ROOT}/タスク.md"
 WISHES_MD = f"{RECALL_ROOT}/やりたいこと.md"
+CONCIERGE_ROOT = "/ob/Concierge"
+HELD_TASKS_MD = f"{CONCIERGE_ROOT}/預かりタスク.md"   # 秘書が預かったタスク（メール由来）
 
 DAY_START_HOUR = 4
 JST = timezone(timedelta(hours=9))
@@ -37,3 +39,13 @@ def get_text(path):
         return None
     r.raise_for_status()
     return r.content.decode("utf-8")
+
+
+def put_text(path, text):
+    cur = ""
+    for p in path.rsplit("/", 1)[0].strip("/").split("/"):
+        cur += "/" + p
+        r = s.request("MKCOL", DAV + quote(cur), timeout=30)
+        if r.status_code not in (201, 405):
+            r.raise_for_status()
+    s.put(DAV + quote(path), data=text.encode("utf-8"), timeout=30).raise_for_status()

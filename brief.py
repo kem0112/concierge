@@ -1,10 +1,11 @@
-"""モーニングブリーフと、メールのまとめ。材料を集めて Codex に1通の読み物にしてもらう。
+"""モーニングブリーフ。材料を集めて Codex に1通の読み物にしてもらう。
+メールは秘書がすでに仕分けた結果（棚・要約）を渡す。生の本文は渡さない。
 Codex が失敗した日も、材料をそのまま並べた版を返す（届かない日を作らない）。"""
 import re
-from datetime import timedelta
+from collections import Counter
 
+import secretary as sec
 from ai import run_codex, load_prompt
-from mail import fetch_recent, mails_text
 from nc import WEEKDAYS, log
 from recall_data import open_tasks_with_due, tasks_by_window, yesterday_summary, random_wish
 from weather import weather_text
@@ -14,7 +15,7 @@ def _safe(fn, *a, default=None):
     try:
         return fn(*a)
     except Exception as e:  # noqa: BLE001
-        log(f"NG material {fn.__name__}: {e!r}")
+        log(f"NG material {getattr(fn, '__name__', fn)}: {e!r}")
         return default
 
 
@@ -22,47 +23,77 @@ def _lst(xs):
     return "\n".join(f"- {x}" for x in xs) if xs else "- なし"
 
 
-def _strip_fence(text):
-    return re.sub(r"^```(?:markdown|md)?\s*\n|\n```\s*$", "", text.strip())
+def mail_materials():
+    """ブリーフのメール欄の材料（機械的に作る）"""
+    st = sec.load_state()
+    new = sec.since_last_brief(st)
+    by = {c: [r for r in new if r["category"] == c] for c in sec.SHELF_ICON}
+    ads = by["広告・通知"]
+    senders = Counter(r["from"].split("<")[0].strip().strip('"')[:16] for r in ads).most_common(4)
+    open_now = _safe(sec.open_items, default=None)
+    lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
+             f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
+    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"]]
+    if ads:
+        lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
+                     + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
+    lines.append("\n片付いていない要対応（受信トレイに残っているもの、古い順）:")
+    if open_now is None:
+        lines.append("- （確認できませんでした）")
+    else:
+        todo = [r for r in open_now if r["category"] == "要対応"]
+        lines += [sec.line(r, with_age=True) for r in todo] or ["- なし"]
+    events = [r for r in st["records"].values() if r.get("event")]
+    lines.append("\nメールにあった予定（直近）:")
+    lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
+              for r in sorted(events, key=lambda r: r["event"]["date"])[-6:]] or ["- なし"]
+    return "\n".join(lines)
 
 
-def build_brief(today, mail_hours=24):
+def build_brief(today):
     tasks = tasks_by_window(today, _safe(open_tasks_with_due, default=[]))
-    mails = _safe(fetch_recent, mail_hours, default=None)
     materials = (
         f"## 日付\n{today:%Y-%m-%d}（{WEEKDAYS[today.weekday()]}）\n\n"
         f"## 天気\n{_safe(weather_text, today) or '（取得できず）'}\n\n"
         f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n## 今週中（2〜7日後）が期日のタスク\n{_lst(tasks['week'])}\n\n"
+        f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
         f"## 昨日の日記の要約\n{_safe(yesterday_summary, today) or '（昨日の日記はまだありません）'}\n\n"
-        f"## やりたいことリストから1つ\n- {_safe(random_wish) or '（まだありません）'}\n\n"
-        f"## 直近{mail_hours}時間のメール\n"
-        f"{mails_text(mails) if mails is not None else '（メールを取得できませんでした）'}\n"
+        f"## やりたいことリストから1つ\n- {_safe(random_wish) or '（まだありません）'}\n"
     )
+    text = None
     try:
-        text = _strip_fence(run_codex(load_prompt("brief.md").replace("{{MATERIALS}}", materials), timeout=400))
-        if text:
-            return text
+        text = re.sub(r"^```(?:markdown|md)?\s*\n|\n```\s*$", "",
+                      run_codex(load_prompt("brief.md").replace("{{MATERIALS}}", materials), timeout=400).strip())
     except Exception as e:  # noqa: BLE001
         log(f"NG brief codex: {e!r}")
-    n_mail = "?" if mails is None else len(mails)
-    return ("☀️ **おはようございます**（AIのまとめは失敗したので材料だけ）\n"
-            f"**今日やること**\n{_lst(tasks['overdue'] + tasks['today'])}\n"
-            f"**明日**\n{_lst(tasks['tomorrow'])}\n📬 直近{mail_hours}時間のメール: {n_mail}通（`!mail` で一覧）")
+    if not text:
+        text = "☀️ **おはようございます**（AIのまとめは失敗したので材料だけ）\n\n" + materials
+    _safe(sec.mark_briefed)
+    return text
 
 
-def build_mail_digest(hours=24):
-    mails = fetch_recent(hours)
-    if not mails:
-        return f"📭 直近{hours}時間のメールはありません"
-    try:
-        prompt = (load_prompt("mail.md").replace("{{HOURS}}", str(hours))
-                  .replace("{{MAILS}}", mails_text(mails)))
-        text = _strip_fence(run_codex(prompt, timeout=400))
-        if text:
-            return text
-    except Exception as e:  # noqa: BLE001
-        log(f"NG mail codex: {e!r}")
-    lines = [f"📬 直近{hours}時間のメール {len(mails)}通（AIのまとめは失敗したので一覧だけ）"]
-    lines += [f"- [{m['account']}] {m['date']} {m['from'][:30]}：{m['subject']}" for m in mails]
-    return "\n".join(lines)
+def mail_list(hours=24):
+    """!mail: 直近 hours 時間に仕分けたメールの一覧（Codex は使わない）"""
+    from datetime import datetime, timedelta
+    from nc import JST
+    since = (datetime.now(JST) - timedelta(hours=hours)).isoformat()
+    recs = sorted([r for r in sec.load_state()["records"].values() if r.get("processed_at", "") > since],
+                  key=lambda r: list(sec.SHELF_ICON).index(r["category"]))
+    if not recs:
+        return f"📭 直近{hours}時間に仕分けたメールはありません"
+    head = f"📬 直近{hours}時間のメール {len(recs)}通"
+    ads = [r for r in recs if r["category"] == "広告・通知"]
+    body = [sec.line(r) for r in recs if r["category"] != "広告・通知"]
+    if ads:
+        body.append(f"🗑 広告・通知 {len(ads)}通")
+    return head + "\n" + "\n".join(body)
+
+
+def inbox_list():
+    """!inbox: 片付いていない 🔴🟡"""
+    items = sec.open_items()
+    if not items:
+        return "✨ 片付いていない要対応・確認推奨はありません"
+    return "📥 **片付いていないメール**（受け皿の受信トレイに残っているもの）\n" + \
+        "\n".join(sec.line(r, with_age=True) for r in items)
