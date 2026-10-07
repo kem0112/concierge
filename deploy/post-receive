@@ -1,0 +1,13 @@
+#!/bin/bash
+# pk-206 の ~/repos/concierge.git/hooks/post-receive に置く。
+# main が push されたら ~/concierge に展開する（管理外のファイルは残る）。
+while read old new ref; do
+  if [ "$ref" = "refs/heads/main" ]; then
+    mkdir -p /home/ikm/concierge
+    git --work-tree=/home/ikm/concierge --git-dir=/home/ikm/repos/concierge.git checkout -f main
+    echo "deployed to ~/concierge: $(git --git-dir=/home/ikm/repos/concierge.git log -1 --format='%h %s' main)"
+    if systemctl --user try-restart concierge-bot 2>/dev/null; then
+      echo "concierge-bot restarted"
+    fi
+  fi
+done
