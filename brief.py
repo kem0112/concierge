@@ -50,6 +50,31 @@ def mail_materials():
     return "\n".join(lines)
 
 
+def build_evening(today):
+    """イブニングブリーフ（夕方）: 朝以降のメール・片付いていないこと・明日の準備"""
+    from datetime import timedelta
+    tomorrow = today + timedelta(days=1)
+    tasks = tasks_by_window(today, _safe(open_tasks_with_due, default=[]))
+    materials = (
+        f"## 日付\n{today:%Y-%m-%d}（{WEEKDAYS[today.weekday()]}）\n\n"
+        f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
+        f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
+        f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n"
+        f"## 明日の天気\n{_safe(weather_text, tomorrow) or '（取得できず）'}\n"
+    )
+    text = None
+    try:
+        text = re.sub(r"^```(?:markdown|md)?\s*\n|\n```\s*$", "",
+                      run_codex(load_prompt("evening.md").replace("{{MATERIALS}}", materials), timeout=400,
+                                profile="main", task="evening").strip())
+    except Exception as e:  # noqa: BLE001
+        log(f"NG evening codex: {e!r}")
+    if not text:
+        text = "🌆 **おつかれさまです**（AIのまとめは失敗したので材料だけ）\n\n" + materials
+    _safe(sec.mark_briefed)
+    return text
+
+
 def build_brief(today):
     tasks = tasks_by_window(today, _safe(open_tasks_with_due, default=[]))
     materials = (

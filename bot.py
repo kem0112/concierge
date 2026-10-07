@@ -4,6 +4,7 @@
   10分おき       受け皿 Gmail の郵便受けを覗き、未処理のメールを全部仕分ける（ラベル・預かりタスク）
                  今日・明日の締切や予定に関わるものは、すぐ知らせる
   毎朝 8:00      モーニングブリーフ（天気・タスク・メールの仕分け結果・片付いていないもの・昨日のふりかえり）
+  毎夕 18:00     イブニングブリーフ（朝以降のメール・まだ片付いていないこと・明日の準備）
 
   !brief / !mail [時間] / !inbox / !check
   !vip / !mute / !except  add <パターン> [呼び名] | remove <パターン> | list
@@ -23,7 +24,7 @@ from discord.ext import tasks
 
 import rules as rules_mod
 import secretary as sec
-from brief import build_brief, mail_list, inbox_list
+from brief import build_brief, build_evening, mail_list, inbox_list
 from nc import JST, log, log_date
 
 TOKEN = os.environ["CONCIERGE_DISCORD_TOKEN"]
@@ -35,6 +36,8 @@ if not ALLOWED_USER_IDS:
     sys.exit("CONCIERGE_ALLOWED_USER_IDS が未設定です")
 _h, _m = (os.environ.get("CONCIERGE_BRIEF_TIME", "08:00").split(":") + ["0"])[:2]
 BRIEF_TIME = dtime(hour=int(_h), minute=int(_m), tzinfo=JST)
+_eh, _em = (os.environ.get("CONCIERGE_EVENING_TIME", "18:00").split(":") + ["0"])[:2]
+EVENING_TIME = dtime(hour=int(_eh), minute=int(_em), tzinfo=JST)
 POLL_MINUTES = int(os.environ.get("CONCIERGE_POLL_MINUTES", "10"))
 LIMIT = 1900
 RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない・最低でも確認推奨）"),
@@ -42,8 +45,8 @@ RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない�
               "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）")}
 HELP = ("🛎️ **Concierge**（秘書）\n"
         f"- {POLL_MINUTES}分おきに郵便受けを見て、大学・就活・大事な相手からのメールはすぐ、それ以外は{sec.BATCH_WAIT_MIN}分ごとにまとめて仕分けます。"
-        f"毎朝 {BRIEF_TIME:%H:%M} にブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
-        "- `!brief` ブリーフ / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
+        f"毎朝 {BRIEF_TIME:%H:%M} にモーニング、毎夕 {EVENING_TIME:%H:%M} にイブニングブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
+        "- `!brief` ブリーフ（15時より前は朝の形、以降は夕方の形） / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
         "- `!vip` `!mute` `!except` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`\n"
         f"- 自動アーカイブ: {'オン' if sec.AUTO_ARCHIVE else 'オフ（ラベルだけ付けています）'}")
 
@@ -178,6 +181,26 @@ async def before_brief():
     await client.wait_until_ready()
 
 
+@tasks.loop(time=EVENING_TIME)
+async def evening_brief():
+    await check_mail(force=True)
+    try:
+        async with _lock:
+            text = await asyncio.to_thread(build_evening, datetime.now(JST).date())
+        await send_long(text)
+    except Exception as e:  # noqa: BLE001
+        log(f"NG evening brief: {e!r}")
+        try:
+            await send_long(f"⚠️ イブニングブリーフを作れませんでした: `{str(e)[:300]}`")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@evening_brief.before_loop
+async def before_evening():
+    await client.wait_until_ready()
+
+
 # ---- コマンド ----
 
 def rule_command(words):
@@ -217,8 +240,12 @@ async def on_message(message):
             await react(message, "⏳")
             if cmd == "!brief":
                 await check_mail(force=True)
+                now = datetime.now(JST)
                 async with _lock:
-                    text = await asyncio.to_thread(build_brief, log_date(datetime.now(JST)))
+                    if 4 <= now.hour < 15:
+                        text = await asyncio.to_thread(build_brief, log_date(now))
+                    else:
+                        text = await asyncio.to_thread(build_evening, log_date(now))
             elif cmd == "!mail":
                 hours = int(words[1]) if len(words) > 1 and words[1].isdigit() else 24
                 text = await asyncio.to_thread(mail_list, min(hours, 24 * 30))
@@ -237,12 +264,14 @@ async def on_message(message):
 
 @client.event
 async def on_ready():
-    log(f"Concierge ready as {client.user} (channel={CHANNEL_ID}, brief={BRIEF_TIME:%H:%M}, "
+    log(f"Concierge ready as {client.user} (channel={CHANNEL_ID}, brief={BRIEF_TIME:%H:%M}/{EVENING_TIME:%H:%M}, "
         f"poll={POLL_MINUTES}min, auto_archive={sec.AUTO_ARCHIVE})")
     if not poll_mail.is_running():
         poll_mail.start()
     if not morning_brief.is_running():
         morning_brief.start()
+    if not evening_brief.is_running():
+        evening_brief.start()
 
 
 if __name__ == "__main__":
