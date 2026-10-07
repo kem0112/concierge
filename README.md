@@ -6,7 +6,7 @@ Codex がまとめて知らせる。
 ## 構想
 
 ```
-材料:  Recall（タスク・日記・やりたいこと, Nextcloud 経由で読むだけ）
+材料:  Recall（タスク・日記・長期タスク, Nextcloud 経由で読むだけ）
        メール（受け皿 Gmail に4アドレスを転送 → IMAP で読み取り専用に開く）
        天気（Open-Meteo）
   ↓

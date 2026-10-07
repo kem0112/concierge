@@ -84,7 +84,7 @@ def build_brief(today):
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n## 今週中（2〜7日後）が期日のタスク\n{_lst(tasks['week'])}\n\n"
         f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
         f"## 昨日の日記の要約\n{_safe(yesterday_summary, today) or '（昨日の日記はまだありません）'}\n\n"
-        f"## やりたいことリストから1つ\n- {_safe(random_wish) or '（まだありません）'}\n"
+        f"## 長期タスクから1つ\n- {_safe(random_wish) or '（まだありません）'}\n"
     )
     text = None
     try:

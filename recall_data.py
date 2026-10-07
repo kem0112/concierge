@@ -3,7 +3,7 @@ import random
 import re
 from datetime import date, timedelta
 
-from nc import JOURNAL_DIR, TASKS_MD, HELD_TASKS_MD, WISHES_MD, WEEKDAYS, get_text
+from nc import JOURNAL_DIR, TASK_FILES, HELD_TASKS_MD, WISH_FILES, WEEKDAYS, get_text
 
 TASK_RE = re.compile(r"^\s*- \[ \] (.*)$")
 DUE_RE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
@@ -20,7 +20,7 @@ def _clean(body):
 def open_tasks_with_due(content=None):
     """自分のタスク（Recall）と預かりタスク（Concierge）の両方。預かりの方には 📧 が付く"""
     if content is None:
-        content = (get_text(TASKS_MD) or "") + "\n" + (get_text(HELD_TASKS_MD) or "")
+        content = "\n".join(get_text(p) or "" for p in TASK_FILES + [HELD_TASKS_MD])
     out = []
     for line in content.splitlines():
         m = TASK_RE.match(line)
@@ -53,6 +53,13 @@ def yesterday_summary(today):
 
 
 def random_wish():
-    text = get_text(WISHES_MD) or ""
-    items = [_clean(ln[2:]) for ln in text.splitlines() if ln.startswith("- ")]
+    """長期タスク（未完了）と、以前の やりたいこと.md から1つ"""
+    text = "\n".join(get_text(p) or "" for p in WISH_FILES)
+    items = []
+    for ln in text.splitlines():
+        if ln.startswith("- [x]") or not ln.startswith("- "):
+            continue
+        body = ln[6:] if ln.startswith("- [ ] ") else ln[2:]
+        items.append(_clean(body))
+    items = [x for x in items if x]
     return random.choice(items) if items else None
