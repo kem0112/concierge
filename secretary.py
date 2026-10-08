@@ -201,7 +201,8 @@ def _load_done():
     except (OSError, ValueError):
         d = {}
     d.setdefault("done", {})       # uid -> 済みにした時刻
-    d.setdefault("messages", {})   # Discord のメッセージID -> uid
+    d.setdefault("messages", {})   # Discord のメッセージID -> uid（⏰ 1通に1件）
+    d.setdefault("boards", {})     # Discord のメッセージID -> [uid, ...]（🔴一覧。番号のリアクションと対応）
     return d
 
 
@@ -209,6 +210,7 @@ def _save_done(d):
     cutoff = (datetime.now(JST) - timedelta(days=KEEP_DAYS)).isoformat()
     d["done"] = {k: v for k, v in d["done"].items() if v >= cutoff}
     d["messages"] = dict(list(d["messages"].items())[-2000:])
+    d["boards"] = dict(list(d["boards"].items())[-200:])
     os.makedirs(os.path.dirname(DONE_PATH), exist_ok=True)
     tmp = DONE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -235,6 +237,17 @@ def remember_message(message_id, uid):
         d = _load_done()
         d["messages"][str(message_id)] = uid
         _save_done(d)
+
+
+def remember_board(message_id, uids):
+    with _done_lock:
+        d = _load_done()
+        d["boards"][str(message_id)] = list(uids)
+        _save_done(d)
+
+
+def board_for_message(message_id):
+    return _load_done()["boards"].get(str(message_id))
 
 
 def uid_for_message(message_id):

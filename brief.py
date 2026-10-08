@@ -43,18 +43,18 @@ def mail_materials():
     done = sec.done_uids()
     lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
              f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    # 新着の 🔴🟡 はここで1回だけ出す（✅ 済みにしたものは出さない）
-    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"] if str(r["uid"]) not in done]
+    # 🔴 は bot がブリーフの最後に一覧（✅ で済みにできる）を付けるので、ここでは件数だけ渡す
+    lines += [sec.line(r) for r in by["確認推奨"] if str(r["uid"]) not in done]
     if ads:
         lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
                      + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
-    # 以前からの未対応 🔴 は一覧にせず件数だけ（何度も出てくると鬱陶しいので）。中身は !todo で1件ずつ
+    todo = sec.todo_items()
     new_ids = {r["uid"] for r in new}
-    old = [r for r in sec.todo_items() if r["uid"] not in new_ids]
     oldest = max(((datetime.now(JST).date() - datetime.fromisoformat(r["date"]).date()).days
-                  for r in old if r.get("date")), default=0)
-    lines.append(f"\n以前からの未対応の要対応: {len(old)}件" + (f"（いちばん古いものは{oldest}日目）" if old else "")
-                 + "。一覧は `!todo`、片付いたら ✅")
+                  for r in todo if r.get("date")), default=0)
+    lines.append(f"\n未対応の🔴要対応: {len(todo)}件（うち新着 {sum(r['uid'] in new_ids for r in todo)}件）"
+                 + (f"、いちばん古いものは{oldest}日目" if oldest >= 2 else "")
+                 + "。中身はブリーフの最後に一覧で付く")
     events = [r for r in st["records"].values() if r.get("event")]
     lines.append("\nメールにあった予定（直近）:")
     lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
