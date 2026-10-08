@@ -8,6 +8,7 @@
 """
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 
 import rules as rules_mod
@@ -17,6 +18,9 @@ from nc import JST, HELD_TASKS_MD, get_text, put_text, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state", "mail.json")
+# 「済み」の印（Discord のボタンで付ける。Gmail には触らない）。仕分けの処理と書き込みがぶつからないよう別ファイル
+DONE_PATH = os.path.join(HERE, "state", "done.json")
+_done_lock = threading.Lock()
 KEEP_DAYS = 60
 FIRST_RUN_DAYS = 3
 AUTO_ARCHIVE = os.environ.get("CONCIERGE_AUTO_ARCHIVE", "0") == "1"
@@ -176,7 +180,8 @@ def since_last_brief(st):
 def open_items(categories=("要対応", "確認推奨")):
     """まだ受信トレイにある（片付いていない）指定の棚のメール。古い順"""
     st = load_state()
-    cands = [r for r in st["records"].values() if r["category"] in categories]
+    done = load_done()
+    cands = [r for r in st["records"].values() if r["category"] in categories and str(r["uid"]) not in done]
     if not cands:
         return []
     with Mailbox() as mb:
@@ -184,6 +189,37 @@ def open_items(categories=("要対応", "確認推奨")):
             return []
         alive = mb.in_inbox([r["uid"] for r in cands])
     return sorted([r for r in cands if r["uid"] in alive], key=lambda r: r.get("date") or "")
+
+
+# ---- 済み ----
+
+def load_done():
+    try:
+        with open(DONE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def set_done(uid, done=True):
+    """uid のメールを済みにする（done=False で外す）。60日より古い印は捨てる"""
+    with _done_lock:
+        d = load_done()
+        if done:
+            d[str(uid)] = datetime.now(JST).isoformat()
+        else:
+            d.pop(str(uid), None)
+        cutoff = (datetime.now(JST) - timedelta(days=KEEP_DAYS)).isoformat()
+        d = {k: v for k, v in d.items() if v >= cutoff}
+        os.makedirs(os.path.dirname(DONE_PATH), exist_ok=True)
+        tmp = DONE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, DONE_PATH)
+
+
+def get_record(uid):
+    return load_state()["records"].get(str(uid))
 
 
 def mark_briefed():

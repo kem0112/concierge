@@ -42,16 +42,19 @@ def mail_materials():
     open_now = _safe(sec.open_items, default=None)
     lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
              f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"]]
+    # 🔴 はブリーフのあとに1件ずつ「済み」ボタン付きで送るので、本文には件数だけ渡す
+    lines += [sec.line(r) for r in by["確認推奨"]]
     if ads:
         lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
                      + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
-    lines.append("\n片付いていない要対応（受信トレイに残っているもの、古い順）:")
     if open_now is None:
-        lines.append("- （確認できませんでした）")
+        lines.append("\n片付いていない要対応: （確認できませんでした）")
     else:
         todo = [r for r in open_now if r["category"] == "要対応"]
-        lines += [sec.line(r, with_age=True) for r in todo] or ["- なし"]
+        oldest = max(((sec.datetime.now(sec.JST).date() - sec.datetime.fromisoformat(r["date"]).date()).days
+                      for r in todo if r.get("date")), default=0)
+        lines.append(f"\n片付いていない要対応: {len(todo)}件（新着を含む。このブリーフのあとに1件ずつ別メッセージで送る）"
+                     + (f"。いちばん古いものは{oldest}日目" if oldest >= 2 else ""))
     events = [r for r in st["records"].values() if r.get("event")]
     lines.append("\nメールにあった予定（直近）:")
     lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
@@ -127,10 +130,11 @@ def mail_list(hours=24):
     return head + "\n" + "\n".join(body)
 
 
-def inbox_list():
-    """!inbox: 片付いていない 🔴🟡"""
-    items = sec.open_items()
-    if not items:
-        return "✨ 片付いていない要対応・確認推奨はありません"
-    return "📥 **片付いていないメール**（受け皿の受信トレイに残っているもの）\n" + \
-        "\n".join(sec.line(r, with_age=True) for r in items)
+def inbox_items():
+    """!inbox: 片付いていない 🔴🟡（済みにしていない・受け皿の受信トレイに残っているもの）。古い順"""
+    return sec.open_items()
+
+
+def open_todo():
+    """ブリーフのあとに1件ずつ送る 🔴"""
+    return sec.open_items(("要対応",))
