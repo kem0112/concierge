@@ -39,12 +39,27 @@ def load_state():
     st.setdefault("last_brief", None)
     st.setdefault("records", {})
     st.setdefault("pending_since", {})   # 見つけたがまだ仕分けていないメール: uid -> 初めて見た時刻
+    st.setdefault("next_no", 1)          # メールの通し番号（#12 など。一度振ったら変えない）
+    st.setdefault("alerts", {})          # ⏰ のメッセージID -> uid（✅ リアクションで済みにするため）
+    # 番号が無い記録（この機能より前のもの）に、仕分けた順で番号を振る
+    for rec in sorted((r for r in st["records"].values() if not r.get("no")),
+                      key=lambda r: (r.get("processed_at", ""), r["uid"])):
+        assign_no(st, rec)
     return st
+
+
+def assign_no(st, rec):
+    """広告・通知 以外のメールに通し番号を振る"""
+    if rec.get("no") or rec["category"] == "広告・通知":
+        return
+    rec["no"] = st["next_no"]
+    st["next_no"] += 1
 
 
 def save_state(st):
     cutoff = (datetime.now(JST) - timedelta(days=KEEP_DAYS)).isoformat()
     st["records"] = {k: v for k, v in st["records"].items() if v.get("processed_at", "") >= cutoff}
+    st["alerts"] = {m: u for m, u in st.get("alerts", {}).items() if str(u) in st["records"]}
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -139,6 +154,7 @@ def run_once(force=False):
                         "reason": d["reason"], "summary": (ai or {}).get("summary", ""),
                         "deadline": (ai or {}).get("deadline"), "event": (ai or {}).get("event"),
                         "archived": False, "processed_at": now.isoformat()})
+            assign_no(st, rec)
             labels = [f"Concierge/{d['category']}", f"宛先/{mail['account']}"]
             try:
                 mb.add_labels(mail["uid"], labels)
@@ -176,7 +192,7 @@ def since_last_brief(st):
 def open_items(categories=("要対応", "確認推奨")):
     """まだ受信トレイにある（片付いていない）指定の棚のメール。古い順"""
     st = load_state()
-    cands = [r for r in st["records"].values() if r["category"] in categories]
+    cands = [r for r in st["records"].values() if r["category"] in categories and not r.get("done")]
     if not cands:
         return []
     with Mailbox() as mb:
@@ -184,6 +200,40 @@ def open_items(categories=("要対応", "確認推奨")):
             return []
         alive = mb.in_inbox([r["uid"] for r in cands])
     return sorted([r for r in cands if r["uid"] in alive], key=lambda r: r.get("date") or "")
+
+
+# ---- 済み（Discord 上だけの印。Gmail には触らない）----
+
+def set_done(nos, done=True):
+    """番号のメールを済み（done=False なら済みを外す）にする。戻り値 (変えた記録, 見つからない番号)"""
+    st = load_state()
+    by_no = {r.get("no"): r for r in st["records"].values() if r.get("no")}
+    changed, missing = [], []
+    for n in nos:
+        rec = by_no.get(n)
+        if rec is None:
+            missing.append(n)
+            continue
+        if done:
+            rec["done"] = datetime.now(JST).isoformat()
+        else:
+            rec.pop("done", None)
+        changed.append(rec)
+    save_state(st)
+    return changed, missing
+
+
+def remember_alert(message_id, uid):
+    st = load_state()
+    st["alerts"][str(message_id)] = uid
+    save_state(st)
+
+
+def no_for_alert(message_id):
+    st = load_state()
+    uid = st["alerts"].get(str(message_id))
+    rec = st["records"].get(str(uid)) if uid is not None else None
+    return rec.get("no") if rec else None
 
 
 def mark_briefed():
@@ -194,7 +244,8 @@ def mark_briefed():
 
 def line(rec, with_age=False):
     sender = rec["from"].split("<")[0].strip().strip('"')[:24] or rec["from"][:24]
-    s = f"{SHELF_ICON.get(rec['category'], '')} [{rec['account']}] {sender}：{rec['summary'] or rec['subject']}"
+    num = f"#{rec['no']} " if rec.get("no") else ""
+    s = f"{SHELF_ICON.get(rec['category'], '')} {num}[{rec['account']}] {sender}：{rec['summary'] or rec['subject']}"
     if rec.get("deadline"):
         s += f"（〆 {rec['deadline'][5:].replace('-', '/')}）"
     if with_age and rec.get("date"):
