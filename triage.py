@@ -13,7 +13,7 @@ from nc import WEEKDAYS, log
 CATEGORIES = ["要対応", "確認推奨", "参考", "広告・通知"]
 RANK = {c: i for i, c in enumerate(CATEGORIES)}  # 小さいほど重い
 PROTECTED_ACCOUNTS = {"大学"}   # 就活宛ては保護しない（募集案内が多いので AI の判断に任せる。大事な相手は VIP で守る）
-FAST_ACCOUNTS = {"大学", "就活"}   # 届いたら待たずにすぐ仕分ける宛先（締切の急ぎ通知を遅らせないため）
+FAST_ACCOUNTS = {"大学"}   # 届いたら待たずにすぐ仕分ける宛先（就活宛ては他と同じくまとめて仕分ける）
 BATCH = 10
 
 

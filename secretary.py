@@ -25,7 +25,7 @@ _done_lock = threading.Lock()
 KEEP_DAYS = 60
 FIRST_RUN_DAYS = 3
 AUTO_ARCHIVE = os.environ.get("CONCIERGE_AUTO_ARCHIVE", "0") == "1"
-# Codex に渡すのは、まとめて（呼び出し回数を減らす）。ただし大学・就活・VIP のメールが来ていたら、すぐ仕分ける
+# Codex に渡すのは、まとめて（呼び出し回数を減らす）。ただし大学宛て・VIP のメールが来ていたら、すぐ仕分ける
 BATCH_WAIT_MIN = int(os.environ.get("CONCIERGE_BATCH_WAIT_MIN", "60"))
 BATCH_MAX = 10
 SHELF_ICON = {"要対応": "🔴", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "未分類": "❓"}
@@ -100,7 +100,7 @@ def run_once(force=False):
     """未処理のメールを仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], held=[line], failed=n, waiting=n)
 
     force=False のときは、次のどれかに当たるまで Codex を呼ばずに待つ（郵便受けを見るだけなら Codex は使わない）:
-      - 大学・就活・VIP のメールがある（急ぎの可能性）
+      - 大学宛て・VIP のメールがある（急ぎの可能性）
       - いちばん古い未処理を見つけてから BATCH_WAIT_MIN 分たった
       - 未処理が BATCH_MAX 通たまった
     """
