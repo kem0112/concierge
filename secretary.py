@@ -8,6 +8,7 @@
 """
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 
 import rules as rules_mod
@@ -17,6 +18,10 @@ from nc import JST, HELD_TASKS_MD, get_text, put_text, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state", "mail.json")
+# 「済み」の印（Discord の ✅ リアクションで付ける。Gmail には触らない）と、どの Discord メッセージがどのメールか。
+# 仕分けの処理（mail.json）と書き込みがぶつからないよう別ファイル
+DONE_PATH = os.path.join(HERE, "state", "done.json")
+_done_lock = threading.Lock()
 KEEP_DAYS = 60
 FIRST_RUN_DAYS = 3
 AUTO_ARCHIVE = os.environ.get("CONCIERGE_AUTO_ARCHIVE", "0") == "1"
@@ -176,7 +181,8 @@ def since_last_brief(st):
 def open_items(categories=("要対応", "確認推奨")):
     """まだ受信トレイにある（片付いていない）指定の棚のメール。古い順"""
     st = load_state()
-    cands = [r for r in st["records"].values() if r["category"] in categories]
+    done = done_uids()
+    cands = [r for r in st["records"].values() if r["category"] in categories and str(r["uid"]) not in done]
     if not cands:
         return []
     with Mailbox() as mb:
@@ -184,6 +190,68 @@ def open_items(categories=("要対応", "確認推奨")):
             return []
         alive = mb.in_inbox([r["uid"] for r in cands])
     return sorted([r for r in cands if r["uid"] in alive], key=lambda r: r.get("date") or "")
+
+
+# ---- 済み（受け皿の Gmail は開かない前提。片付いたかどうかは Discord の ✅ だけで決める）----
+
+def _load_done():
+    try:
+        with open(DONE_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("done", {})       # uid -> 済みにした時刻
+    d.setdefault("messages", {})   # Discord のメッセージID -> uid
+    return d
+
+
+def _save_done(d):
+    cutoff = (datetime.now(JST) - timedelta(days=KEEP_DAYS)).isoformat()
+    d["done"] = {k: v for k, v in d["done"].items() if v >= cutoff}
+    d["messages"] = dict(list(d["messages"].items())[-2000:])
+    os.makedirs(os.path.dirname(DONE_PATH), exist_ok=True)
+    tmp = DONE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    os.replace(tmp, DONE_PATH)
+
+
+def done_uids():
+    return set(_load_done()["done"])
+
+
+def set_done(uid, done=True):
+    with _done_lock:
+        d = _load_done()
+        if done:
+            d["done"][str(uid)] = datetime.now(JST).isoformat()
+        else:
+            d["done"].pop(str(uid), None)
+        _save_done(d)
+
+
+def remember_message(message_id, uid):
+    with _done_lock:
+        d = _load_done()
+        d["messages"][str(message_id)] = uid
+        _save_done(d)
+
+
+def uid_for_message(message_id):
+    return _load_done()["messages"].get(str(message_id))
+
+
+def get_record(uid):
+    return load_state()["records"].get(str(uid))
+
+
+def todo_items():
+    """未対応の 🔴: 要対応で、まだ ✅ を付けていないもの（受信トレイかどうかは見ない）。古い順"""
+    st = load_state()
+    done = done_uids()
+    return sorted([r for r in st["records"].values()
+                   if r["category"] == "要対応" and str(r["uid"]) not in done],
+                  key=lambda r: r.get("date") or "")
 
 
 def mark_briefed():

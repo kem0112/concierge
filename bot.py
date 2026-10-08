@@ -6,7 +6,8 @@
   毎朝 8:00      モーニングブリーフ（天気・タスク・メールの仕分け結果・片付いていないもの・昨日のふりかえり）
   毎夕 18:00     イブニングブリーフ（朝以降のメール・まだ片付いていないこと・明日の準備）
 
-  !brief / !mail [時間] / !inbox / !check
+  !brief / !mail [時間] / !todo / !inbox / !check
+  !todo と ⏰急ぎ は1通ずつ送る。✅ リアクションで「済み」（Discord 上の印。Gmail には触らない）。外すと戻る
   !vip / !mute / !except  add <パターン> [呼び名] | remove <パターン> | list
   !help
 
@@ -15,6 +16,7 @@ Recall（記録係）とは別アプリ・別プロセス。Recall の記録は 
 """
 import asyncio
 import os
+import re
 import sys
 import traceback
 from datetime import datetime, time as dtime
@@ -40,12 +42,15 @@ _eh, _em = (os.environ.get("CONCIERGE_EVENING_TIME", "18:00").split(":") + ["0"]
 EVENING_TIME = dtime(hour=int(_eh), minute=int(_em), tzinfo=JST)
 POLL_MINUTES = int(os.environ.get("CONCIERGE_POLL_MINUTES", "10"))
 LIMIT = 1900
+DONE_EMOJI = "✅"
+MAX_CARDS = 20
 RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない・最低でも確認推奨）"),
               "!mute": ("mute", "ミュート（今後アーカイブしてよい。保護対象には効かない）"),
               "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）")}
 HELP = ("🛎️ **Concierge**（秘書）\n"
         f"- {POLL_MINUTES}分おきに郵便受けを見て、大学・就活・大事な相手からのメールはすぐ、それ以外は{sec.BATCH_WAIT_MIN}分ごとにまとめて仕分けます。"
         f"毎朝 {BRIEF_TIME:%H:%M} にモーニング、毎夕 {EVENING_TIME:%H:%M} にイブニングブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
+        "- `!todo` 未対応の🔴を1通ずつ。片付いたら ✅ を押す（⏰急ぎにも ✅）。✅ を外すと戻る\n"
         "- `!brief` ブリーフ（15時より前は朝の形、以降は夕方の形） / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
         "- `!vip` `!mute` `!except` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`\n"
         f"- 自動アーカイブ: {'オン' if sec.AUTO_ARCHIVE else 'オフ（ラベルだけ付けています）'}")
@@ -95,6 +100,54 @@ async def react(message, emoji, remove=False):
         pass
 
 
+# ---- 1通ずつのメール（✅ リアクションで済み）----
+
+def card_text(rec, head="", done=False):
+    body = f"{sec.line(rec, with_age=True)}\n件名: {rec['subject'][:200]}"
+    if head:
+        body = head + "\n" + body
+    if done:
+        return "✅ 済み\n" + "\n".join(f"~~{ln}~~" for ln in body.split("\n"))
+    return body
+
+
+async def send_card(rec, head=""):
+    msg = await (await channel()).send(card_text(rec, head))
+    await asyncio.to_thread(sec.remember_message, msg.id, rec["uid"])
+    await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
+    return msg
+
+
+async def on_card_reaction(payload, done):
+    if payload.channel_id != CHANNEL_ID or payload.user_id not in ALLOWED_USER_IDS:
+        return
+    if str(payload.emoji) != DONE_EMOJI:
+        return
+    uid = await asyncio.to_thread(sec.uid_for_message, payload.message_id)
+    if uid is None:
+        return
+    await asyncio.to_thread(sec.set_done, uid, done)
+    log(f"{'DONE' if done else 'UNDO'} uid={uid}")
+    try:
+        msg = await (await channel()).fetch_message(payload.message_id)
+        rec = await asyncio.to_thread(sec.get_record, uid)
+        if rec:
+            m = re.search(r"⏰ \*\*急ぎ\*\*（[^）]*）", msg.content or "")
+            await msg.edit(content=card_text(rec, m.group(0) if m else "", done))
+    except discord.HTTPException:
+        pass
+
+
+@client.event
+async def on_raw_reaction_add(payload):
+    await on_card_reaction(payload, True)
+
+
+@client.event
+async def on_raw_reaction_remove(payload):
+    await on_card_reaction(payload, False)
+
+
 # ---- 郵便受け ----
 
 async def check_mail(report_empty=False, force=False):
@@ -110,7 +163,7 @@ async def check_mail(report_empty=False, force=False):
                 await send_long(f"⚠️ メールを確認できません（{_poll_failures}回連続）: `{str(e)[:200]}`")
             return
     for rec, reason in out["urgent"]:
-        await send_long(f"⏰ **急ぎ**（{reason}）\n{sec.line(rec)}\n件名: {rec['subject']}")
+        await send_card(rec, head=f"⏰ **急ぎ**（{reason}）")
     if out["failed"]:
         await send_long(f"❓ 仕分けできなかったメールが {out['failed']} 通あります（`Concierge/未分類` ラベル。受信トレイに残しています）")
     if report_empty:
@@ -229,6 +282,16 @@ async def on_message(message):
         if cmd in RULE_KINDS:
             words[0] = cmd
             await message.reply(await asyncio.to_thread(rule_command, words), mention_author=False)
+        elif cmd == "!todo":
+            items = await asyncio.to_thread(sec.todo_items)
+            if not items:
+                await message.reply("✨ 未対応の🔴はありません", mention_author=False)
+                return
+            await message.reply(f"🔴 **未対応** {len(items)}件（古い順）。片付いたら ✅", mention_author=False)
+            for rec in items[:MAX_CARDS]:
+                await send_card(rec)
+            if len(items) > MAX_CARDS:
+                await send_long(f"…ほか {len(items) - MAX_CARDS} 件（✅ で減らしてから、もう一度 `!todo`）")
         elif cmd == "!usage":
             days = int(words[1]) if len(words) > 1 and words[1].isdigit() else 1
             await message.reply(await asyncio.to_thread(usage_summary, days), mention_author=False)

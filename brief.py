@@ -3,10 +3,11 @@
 Codex が失敗した日も、材料をそのまま並べた版を返す（届かない日を作らない）。"""
 import re
 from collections import Counter
+from datetime import datetime
 
 import secretary as sec
 from ai import run_codex, load_prompt
-from nc import WEEKDAYS, log
+from nc import JST, WEEKDAYS, log
 from recall_data import open_tasks_with_due, tasks_by_window, yesterday_summary, random_wish
 from weather import weather_text
 from gcal import calendar_text
@@ -39,19 +40,21 @@ def mail_materials():
     by = {c: [r for r in new if r["category"] == c] for c in sec.SHELF_ICON}
     ads = by["広告・通知"]
     senders = Counter(r["from"].split("<")[0].strip().strip('"')[:16] for r in ads).most_common(4)
-    open_now = _safe(sec.open_items, default=None)
+    done = sec.done_uids()
     lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
              f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"]]
+    # 新着の 🔴🟡 はここで1回だけ出す（✅ 済みにしたものは出さない）
+    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"] if str(r["uid"]) not in done]
     if ads:
         lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
                      + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
-    lines.append("\n片付いていない要対応（受信トレイに残っているもの、古い順）:")
-    if open_now is None:
-        lines.append("- （確認できませんでした）")
-    else:
-        todo = [r for r in open_now if r["category"] == "要対応"]
-        lines += [sec.line(r, with_age=True) for r in todo] or ["- なし"]
+    # 以前からの未対応 🔴 は一覧にせず件数だけ（何度も出てくると鬱陶しいので）。中身は !todo で1件ずつ
+    new_ids = {r["uid"] for r in new}
+    old = [r for r in sec.todo_items() if r["uid"] not in new_ids]
+    oldest = max(((datetime.now(JST).date() - datetime.fromisoformat(r["date"]).date()).days
+                  for r in old if r.get("date")), default=0)
+    lines.append(f"\n以前からの未対応の要対応: {len(old)}件" + (f"（いちばん古いものは{oldest}日目）" if old else "")
+                 + "。一覧は `!todo`、片付いたら ✅")
     events = [r for r in st["records"].values() if r.get("event")]
     lines.append("\nメールにあった予定（直近）:")
     lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
