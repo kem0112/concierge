@@ -128,7 +128,8 @@ def run_once(force=False):
         for m in mails:
             st["pending_since"].setdefault(str(m["uid"]), now.isoformat())
         oldest = min((datetime.fromisoformat(st["pending_since"][str(m["uid"])]) for m in mails), default=now)
-        urgent_possible = any(triage.decide(m, {"category": "参考", "confidence": "high"}, rules)["protected"]
+        urgent_possible = any(m["account"] in triage.FAST_ACCOUNTS
+                              or triage.decide(m, {"category": "参考", "confidence": "high"}, rules)["protected"]
                               for m in mails)
         if not (force or urgent_possible or len(mails) >= BATCH_MAX
                 or now - oldest >= timedelta(minutes=BATCH_WAIT_MIN)):
