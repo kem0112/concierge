@@ -7,8 +7,6 @@
   毎夕 18:00     イブニングブリーフ（朝以降のメール・まだ片付いていないこと・明日の準備）
 
   !brief / !mail [時間] / !inbox / !check
-  !done 番号… / !undo 番号…   メールを「済み」にする（Discord 上の印。Gmail には触らない）
-  ⏰ 急ぎ の通知に ✅ を付けても済みになる（外すと戻る）
   !vip / !mute / !except  add <パターン> [呼び名] | remove <パターン> | list
   !help
 
@@ -42,7 +40,6 @@ _eh, _em = (os.environ.get("CONCIERGE_EVENING_TIME", "18:00").split(":") + ["0"]
 EVENING_TIME = dtime(hour=int(_eh), minute=int(_em), tzinfo=JST)
 POLL_MINUTES = int(os.environ.get("CONCIERGE_POLL_MINUTES", "10"))
 LIMIT = 1900
-DONE_EMOJI = "✅"
 RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない・最低でも確認推奨）"),
               "!mute": ("mute", "ミュート（今後アーカイブしてよい。保護対象には効かない）"),
               "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）")}
@@ -50,7 +47,6 @@ HELP = ("🛎️ **Concierge**（秘書）\n"
         f"- {POLL_MINUTES}分おきに郵便受けを見て、大学・就活・大事な相手からのメールはすぐ、それ以外は{sec.BATCH_WAIT_MIN}分ごとにまとめて仕分けます。"
         f"毎朝 {BRIEF_TIME:%H:%M} にモーニング、毎夕 {EVENING_TIME:%H:%M} にイブニングブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
         "- `!brief` ブリーフ（15時より前は朝の形、以降は夕方の形） / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
-        "- `!done 12 15` メールを済みにする（ブリーフ・`!inbox` に出なくなる。Gmail はそのまま） / `!undo 12` 戻す / ⏰ に ✅ でも済み\n"
         "- `!vip` `!mute` `!except` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`\n"
         f"- 自動アーカイブ: {'オン' if sec.AUTO_ARCHIVE else 'オフ（ラベルだけ付けています）'}")
 
@@ -114,12 +110,7 @@ async def check_mail(report_empty=False, force=False):
                 await send_long(f"⚠️ メールを確認できません（{_poll_failures}回連続）: `{str(e)[:200]}`")
             return
     for rec, reason in out["urgent"]:
-        ch = await channel()
-        msg = await ch.send(f"⏰ **急ぎ**（{reason}）\n{sec.line(rec)}\n件名: {rec['subject'][:200]}\n"
-                            f"（片付いたら {DONE_EMOJI} で済み）")
-        await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
-        async with _lock:
-            await asyncio.to_thread(sec.remember_alert, msg.id, rec["uid"])
+        await send_long(f"⏰ **急ぎ**（{reason}）\n{sec.line(rec)}\n件名: {rec['subject']}")
     if out["failed"]:
         await send_long(f"❓ 仕分けできなかったメールが {out['failed']} 通あります（`Concierge/未分類` ラベル。受信トレイに残しています）")
     if report_empty:
@@ -212,20 +203,6 @@ async def before_evening():
 
 # ---- コマンド ----
 
-def parse_nos(words):
-    return sorted({int(w.lstrip("#")) for w in words if w.lstrip("#").isdigit()})
-
-
-def done_reply(changed, missing, done=True):
-    lines = []
-    if changed:
-        lines.append(("✅ 済みにしました（Gmail はそのまま）" if done else "↩️ 済みを外しました"))
-        lines += [sec.line(r) for r in changed]
-    if missing:
-        lines.append("🤔 見つからない番号: " + ", ".join(f"#{n}" for n in missing))
-    return "\n".join(lines) or "番号を書いてください（例: `!done 12 15`）"
-
-
 def rule_command(words):
     kind, label = RULE_KINDS[words[0]]
     sub = words[1].lower() if len(words) > 1 else "list"
@@ -252,14 +229,6 @@ async def on_message(message):
         if cmd in RULE_KINDS:
             words[0] = cmd
             await message.reply(await asyncio.to_thread(rule_command, words), mention_author=False)
-        elif cmd in ("!done", "!undo"):
-            nos = parse_nos(words[1:])
-            if not nos:
-                await message.reply("番号を書いてください（例: `!done 12 15`）", mention_author=False)
-                return
-            async with _lock:
-                changed, missing = await asyncio.to_thread(sec.set_done, nos, cmd == "!done")
-            await message.reply(done_reply(changed, missing, cmd == "!done"), mention_author=False)
         elif cmd == "!usage":
             days = int(words[1]) if len(words) > 1 and words[1].isdigit() else 1
             await message.reply(await asyncio.to_thread(usage_summary, days), mention_author=False)
@@ -291,30 +260,6 @@ async def on_message(message):
         log(f"NG {cmd}: {e!r}\n{traceback.format_exc()}")
         await message.reply(f"⚠️ 失敗しました: `{str(e)[:300]}`", mention_author=False)
         await react(message, "⏳", remove=True)
-
-
-async def _alert_reaction(payload, done):
-    if payload.channel_id != CHANNEL_ID or payload.user_id not in ALLOWED_USER_IDS:
-        return
-    if str(payload.emoji) != DONE_EMOJI:
-        return
-    async with _lock:
-        no = await asyncio.to_thread(sec.no_for_alert, payload.message_id)
-        if no is None:
-            return
-        changed, _ = await asyncio.to_thread(sec.set_done, [no], done)
-    if changed:
-        log(f"{'DONE' if done else 'UNDO'} #{no}（リアクション）")
-
-
-@client.event
-async def on_raw_reaction_add(payload):
-    await _alert_reaction(payload, True)
-
-
-@client.event
-async def on_raw_reaction_remove(payload):
-    await _alert_reaction(payload, False)
 
 
 @client.event

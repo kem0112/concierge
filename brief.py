@@ -42,11 +42,11 @@ def mail_materials():
     open_now = _safe(sec.open_items, default=None)
     lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
              f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"] if not r.get("done")]
+    lines += [sec.line(r) for r in by["要対応"] + by["確認推奨"]]
     if ads:
         lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
                      + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
-    lines.append("\n片付いていない要対応（済みにしていない・受信トレイに残っているもの、古い順）:")
+    lines.append("\n片付いていない要対応（受信トレイに残っているもの、古い順）:")
     if open_now is None:
         lines.append("- （確認できませんでした）")
     else:
@@ -132,5 +132,5 @@ def inbox_list():
     items = sec.open_items()
     if not items:
         return "✨ 片付いていない要対応・確認推奨はありません"
-    return "📥 **片付いていないメール**（済みにしていない・受け皿の受信トレイに残っているもの）\n" + \
-        "\n".join(sec.line(r, with_age=True) for r in items) + "\n片付いたら `!done 番号`"
+    return "📥 **片付いていないメール**（受け皿の受信トレイに残っているもの）\n" + \
+        "\n".join(sec.line(r, with_age=True) for r in items)
