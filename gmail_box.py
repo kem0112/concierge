@@ -65,7 +65,7 @@ def dec(value):
         return value or ""
 
 
-def _body_text(msg):
+def _body_text(msg, limit=BODY_LIMIT, keep_links=False):
     try:
         part = msg.get_body(preferencelist=("plain", "html"))
         if part is None:
@@ -73,11 +73,13 @@ def _body_text(msg):
         text = part.get_content()
         if part.get_content_type() == "text/html":
             text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+            if keep_links:   # 詳しい要約用: リンク先を残す（<a href="URL">文字</a> → 文字 (URL)）
+                text = re.sub(r'(?is)<a\s[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', r"\2 (\1)", text)
             text = re.sub(r"(?s)<[^>]+>", " ", text)
             text = text.replace("&nbsp;", " ")
         text = re.sub(r"[ \t　]+", " ", text)
         text = re.sub(r"\n\s*\n+", "\n", text).strip()
-        return text[:BODY_LIMIT] + ("…" if len(text) > BODY_LIMIT else "")
+        return text[:limit] + ("…" if len(text) > limit else "")
     except Exception:  # noqa: BLE001
         return ""
 
@@ -149,7 +151,7 @@ class Mailbox:
                 found.add(int(m.group(1)))
         return found
 
-    def fetch(self, uid):
+    def fetch(self, uid, body_limit=BODY_LIMIT, keep_links=False):
         typ, meta = self.imap.uid("FETCH", str(uid), "(RFC822.SIZE X-GM-MSGID BODY.PEEK[HEADER])")
         if typ != "OK" or not meta or not isinstance(meta[0], tuple):
             return None
@@ -182,7 +184,7 @@ class Mailbox:
             "account": account,
             "from": sender,
             "subject": dec(msg.get("Subject")) or "（件名なし）",
-            "body": "（大きい添付付きのため本文は省略）" if header_only else _body_text(msg),
+            "body": "（大きい添付付きのため本文は省略）" if header_only else _body_text(msg, body_limit, keep_links),
             # ルール照合用: 差出人・List-Id と、自分以外の宛先/CC（メーリスのアドレスなど）
             # 自分のアドレスは外す（でないと「kyoto-u.ac.jp」が大学宛ての全メールに当たってしまう）
             "match_text": f"{sender} {msg.get('List-Id', '')} " + " ".join(
@@ -230,6 +232,11 @@ class Mailbox:
                         "from": dec(msg.get("From")), "subject": dec(msg.get("Subject")) or "（件名なし）",
                         "account": account})
         return out
+
+    def fetch_gmid(self, gmid, body_limit=BODY_LIMIT, keep_links=False):
+        """Gmail のメールIDで1通読む（既読にしない）。見つからなければ None"""
+        uids = self._uids(self.imap.uid("SEARCH", "X-GM-MSGID", str(gmid)))
+        return self.fetch(uids[0], body_limit, keep_links) if uids else None
 
     def star_gmid(self, gmid, on=True):
         """Gmail のメールIDでスターを付け外し。見つからなければ False"""

@@ -9,6 +9,7 @@
   !brief / !mail [時間] / !todo（!inbox も同じ） / !check / !retriage
   未対応の🔴 ＝ 受け皿でスターが付いているメール。ブリーフの最後（と !todo）に番号つきの一覧で出る。
   番号のリアクション（1️⃣ など）でスターを外す（外すと付け直す）。⏰急ぎ の 🔴 は ✅ で同じ
+  詳しい要約: !read 番号（いちばん新しい一覧の番号）/ ⏰ に 📖
   !vip / !mute / !except / !site  add <パターン> [呼び名] | remove <パターン> | list
   !help
 
@@ -44,6 +45,7 @@ EVENING_TIME = dtime(hour=int(_eh), minute=int(_em), tzinfo=JST)
 POLL_MINUTES = int(os.environ.get("CONCIERGE_POLL_MINUTES", "10"))
 LIMIT = 1900
 DONE_EMOJI = "✅"
+READ_EMOJI = "📖"
 NUM_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
               "🇦", "🇧", "🇨", "🇩", "🇪", "🇫", "🇬", "🇭", "🇮", "🇯"]   # 1通に付けられるのは20種類まで
 RULE_KINDS = {"!vip": ("vip", "大事な相手（アーカイブ候補にしない・最低でも確認推奨）"),
@@ -56,6 +58,7 @@ HELP = ("🛎️ **Concierge**（秘書）\n"
         "- 受け皿の Gmail には付箋だけ: 🔴→⭐スター / 参考・広告・通知→「アーカイブ候補」/ 就活サイト→「就活サイト」（既読・アーカイブはしません）\n"
         "- 未対応の🔴（スター付き）はブリーフの最後に番号つきで出ます。片付いたら番号のリアクション（1️⃣ など）でスターを外します。Gmail で外しても同じ\n"
         "- `!todo` 未対応の一覧 / `!brief` ブリーフ（15時より前は朝の形） / `!mail [時間]` 仕分けたメール / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
+        "- `!read 3` 一覧の3番を詳しく要約（⏰ には 📖 リアクションでも）。一度作った要約は保存して使い回します\n"
         "- `!retriage` 記録にあるメールを今の決まりで仕分け直す\n"
         "- `!vip` `!mute` `!except` `!site` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`")
 
@@ -116,14 +119,28 @@ def card_text(rec, head="", done=False):
 
 
 async def send_card(rec, head=""):
-    msg = await (await channel()).send(card_text(rec, head) + ("\n（片付いたら ✅）" if rec.get("star") else ""))
-    if rec.get("star") and rec.get("gmid"):
+    hint = "（片付いたら ✅ / 詳しくは 📖）" if rec.get("star") else "（詳しくは 📖）"
+    msg = await (await channel()).send(card_text(rec, head) + "\n" + hint)
+    if rec.get("gmid"):
         await asyncio.to_thread(sec.remember_message, msg.id, rec["gmid"])
-        await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
+        if rec.get("star"):
+            await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
+        await react(msg, READ_EMOJI)
     return msg
 
 
-BOARD_HEAD = "⭐ **未対応のメール**（スター付き。片付いたら番号のリアクションでスターを外す）"
+async def send_detail(gmid, reply_to=None):
+    """詳しい要約を返す（初回は AI、2回目からは保存したもの）"""
+    try:
+        async with _lock:
+            text = await asyncio.to_thread(sec.detail, gmid)
+    except Exception as e:  # noqa: BLE001
+        log(f"NG detail {gmid}: {e!r}")
+        text = f"⚠️ 詳しい要約を作れませんでした: `{str(e)[:200]}`"
+    await send_long(text or "🤔 そのメールが見つかりません（削除されたかもしれません）", reply_to=reply_to)
+
+
+BOARD_HEAD = "⭐ **未対応のメール**（片付いたら番号のリアクションでスターを外す。詳しく読むなら `!read 番号`）"
 
 
 async def send_board(empty_text=None):
@@ -185,10 +202,15 @@ async def on_card_reaction(payload, done):
     if gmids:
         await on_board_reaction(payload, gmids, done)
         return
-    if str(payload.emoji) != DONE_EMOJI:
+    if str(payload.emoji) not in (DONE_EMOJI, READ_EMOJI):
         return
     gmid = await asyncio.to_thread(sec.gmid_for_message, payload.message_id)
     if gmid is None:
+        return
+    if str(payload.emoji) == READ_EMOJI:
+        if done:   # 付けたときだけ（外したときは何もしない）
+            msg = await (await channel()).fetch_message(payload.message_id)
+            await send_detail(gmid, reply_to=msg)
         return
     try:
         await asyncio.to_thread(sec.set_star, gmid, not done)
@@ -353,6 +375,15 @@ async def on_message(message):
         if cmd in RULE_KINDS:
             words[0] = cmd
             await message.reply(await asyncio.to_thread(rule_command, words), mention_author=False)
+        elif cmd == "!read":
+            gmids = await asyncio.to_thread(sec.last_board)
+            n = int(words[1]) if len(words) > 1 and words[1].isdigit() else 0
+            if not 1 <= n <= len(gmids):
+                await message.reply("番号を書いてください（例: `!read 3`。いちばん新しい未対応の一覧の番号）", mention_author=False)
+                return
+            await react(message, "⏳")
+            await send_detail(gmids[n - 1], reply_to=message)
+            await react(message, "⏳", remove=True)
         elif cmd in ("!todo", "!inbox"):
             await send_board(empty_text="✨ スター付き（未対応）のメールはありません")
         elif cmd == "!retriage":

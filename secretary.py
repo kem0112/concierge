@@ -290,6 +290,49 @@ def set_star(gmid, on):
         return mb.star_gmid(gmid, on)
 
 
+DETAIL_PATH = os.path.join(HERE, "state", "details.json")
+DETAIL_BODY_LIMIT = 6000
+
+
+def detail(gmid):
+    """1通を読み直して、詳しい要約（400字くらい）を返す。一度作ったものは state/details.json から返す（AI を使わない）"""
+    try:
+        with open(DETAIL_PATH, encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    if str(gmid) in cache:
+        return cache[str(gmid)]["text"]
+    with Mailbox(all_mail=True) as mb:
+        m = mb.fetch_gmid(gmid, body_limit=DETAIL_BODY_LIMIT, keep_links=True)
+    if m is None:
+        return None
+    from ai import run_codex, load_prompt
+    from nc import WEEKDAYS
+    now = datetime.now(JST)
+    prompt = (load_prompt("detail.md")
+              .replace("{{NOW}}", f"{now:%Y-%m-%d}（{WEEKDAYS[now.weekday()]}）{now:%H:%M}")
+              .replace("{{DATE}}", m["date"] or "?").replace("{{ACCOUNT}}", m["account"])
+              .replace("{{FROM}}", m["from"]).replace("{{SUBJECT}}", m["subject"])
+              .replace("{{BODY}}", m["body"]))
+    text = run_codex(prompt, timeout=300, profile="light", task="mail_detail").strip()
+    head = f"📖 **{m['subject'][:80]}**（{m['from'].split('<')[0].strip()[:30]}）\n"
+    text = head + text
+    cache[str(gmid)] = {"text": text, "at": now.isoformat()}
+    cache = dict(sorted(cache.items(), key=lambda kv: kv[1]["at"])[-300:])   # 古いものから捨てる
+    tmp = DETAIL_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
+    os.replace(tmp, DETAIL_PATH)
+    return text
+
+
+def last_board():
+    """いちばん新しい未対応の一覧の gmid の並び（!read 番号 用）"""
+    boards = _load_links()["boards"]
+    return list(boards.values())[-1] if boards else []
+
+
 def find_by_gmid(gmids):
     st = load_state()
     by_gmid = {r["gmid"]: r for r in st["records"].values() if r.get("gmid")}
