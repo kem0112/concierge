@@ -1,6 +1,6 @@
-"""受け皿 Gmail を IMAP で扱う。触るのはラベルの追加と「受信トレイから外す（アーカイブ）」だけ。
+"""受け皿 Gmail を IMAP で扱う。触るのはラベルの追加とスター（\\Flagged）の付け外しだけ。
 
-既読にしない（本文は BODY.PEEK で読む）・削除しない・送信しない。
+既読にしない（本文は BODY.PEEK で読む）・アーカイブしない・削除しない・送信しない。
 Gmail のラベル名は IMAP では modified UTF-7 で書く（日本語のラベルを付けるため）。
 """
 import base64
@@ -82,13 +82,33 @@ def _body_text(msg):
         return ""
 
 
+def _addr(value):
+    addrs = getaddresses([value or ""])
+    return (addrs[0][1] if addrs else "").lower()
+
+
 class Mailbox:
+    """with Mailbox() で受信トレイ、with Mailbox(all_mail=True) で「すべてのメール」（スター付きを探す・外す）"""
+
+    def __init__(self, all_mail=False):
+        self.all_mail = all_mail
+
+    def _all_mail_name(self):
+        typ, data = self.imap.list()
+        for line in data or []:
+            line = line.decode() if isinstance(line, bytes) else str(line)
+            if "\\All" in line:
+                m = re.search(r'"([^"]+)"\s*$', line) or re.search(r"(\S+)\s*$", line)
+                return m.group(1)
+        raise RuntimeError("「すべてのメール」フォルダが見つかりません")
+
     def __enter__(self):
         self.imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         self.imap.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        typ, _ = self.imap.select("INBOX")  # 書き込み可（ラベル・アーカイブのため）。既読はつけない
+        box = f'"{self._all_mail_name()}"' if self.all_mail else "INBOX"
+        typ, _ = self.imap.select(box)  # 書き込み可（ラベル・スターのため）。既読はつけない
         if typ != "OK":
-            raise RuntimeError("受信トレイを開けませんでした")
+            raise RuntimeError(f"{box} を開けませんでした")
         uv = self.imap.response("UIDVALIDITY")[1]
         self.uidvalidity = int(uv[0]) if uv and uv[0] else 0
         return self
@@ -130,10 +150,11 @@ class Mailbox:
         return found
 
     def fetch(self, uid):
-        typ, meta = self.imap.uid("FETCH", str(uid), "(RFC822.SIZE BODY.PEEK[HEADER])")
+        typ, meta = self.imap.uid("FETCH", str(uid), "(RFC822.SIZE X-GM-MSGID BODY.PEEK[HEADER])")
         if typ != "OK" or not meta or not isinstance(meta[0], tuple):
             return None
         size = int(re.search(rb"RFC822\.SIZE (\d+)", meta[0][0]).group(1))
+        gm = re.search(rb"X-GM-MSGID (\d+)", meta[0][0])
         header_only = size > MAX_FULL_SIZE
         raw = meta[0][1]
         if not header_only:
@@ -154,6 +175,8 @@ class Mailbox:
         sender = dec(msg.get("From"))
         return {
             "uid": uid,
+            "gmid": gm.group(1).decode() if gm else None,   # Gmail のメールID（フォルダが変わっても同じ）
+            "from_addr": _addr(msg.get("From")),
             "msgid": (msg.get("Message-ID") or f"uid-{uid}").strip(),
             "date": dt.isoformat() if dt else None,
             "account": account,
@@ -172,6 +195,48 @@ class Mailbox:
             typ, _ = self.imap.uid("STORE", str(uid), "+X-GM-LABELS", arg)
             if typ != "OK":
                 raise RuntimeError(f"ラベルを付けられませんでした: uid={uid}")
+
+    def star(self, uid, on=True):
+        typ, _ = self.imap.uid("STORE", str(uid), "+FLAGS" if on else "-FLAGS", r"(\Flagged)")
+        if typ != "OK":
+            raise RuntimeError(f"スターを{'付け' if on else '外せ'}ませんでした: uid={uid}")
+
+    def remove_labels(self, uid, labels):
+        if labels:
+            arg = "(" + " ".join(f'"{imap_utf7(x)}"' for x in labels) + ")"
+            self.imap.uid("STORE", str(uid), "-X-GM-LABELS", arg)
+
+    # ---- ここから下は Mailbox(all_mail=True) で使う ----
+
+    def starred(self):
+        """スター付きのメール（どのフォルダにあっても）。[{gmid, uid, date, from, subject, account}]"""
+        uids = self._uids(self.imap.uid("SEARCH", "X-GM-RAW", '"is:starred"'))
+        out = []
+        for uid in uids:
+            typ, data = self.imap.uid("FETCH", str(uid),
+                                      "(X-GM-MSGID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE TO CC DELIVERED-TO)])")
+            if typ != "OK" or not data or not isinstance(data[0], tuple):
+                continue
+            gm = re.search(rb"X-GM-MSGID (\d+)", data[0][0])
+            msg = email.message_from_bytes(data[0][1], policy=policy.default)
+            try:
+                dt = parsedate_to_datetime(msg["Date"]).astimezone(JST).isoformat()
+            except Exception:  # noqa: BLE001
+                dt = None
+            rcpt = getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []) + msg.get_all("Delivered-To", []))
+            rcpt_text = " ".join(f"{n} {a}" for n, a in rcpt).lower()
+            account = next((label for key, label in ACCOUNTS if key in rcpt_text), "その他")
+            out.append({"gmid": gm.group(1).decode() if gm else None, "uid": uid, "date": dt,
+                        "from": dec(msg.get("From")), "subject": dec(msg.get("Subject")) or "（件名なし）",
+                        "account": account})
+        return out
+
+    def star_gmid(self, gmid, on=True):
+        """Gmail のメールIDでスターを付け外し。見つからなければ False"""
+        uids = self._uids(self.imap.uid("SEARCH", "X-GM-MSGID", str(gmid)))
+        for uid in uids:
+            self.star(uid, on)
+        return bool(uids)
 
     def archive(self, uid):
         """受信トレイから外す（Gmail の「アーカイブ」）。メール自体は「すべてのメール」に残る"""

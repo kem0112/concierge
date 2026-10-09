@@ -1,6 +1,6 @@
 """メールの仕分け。Codex に棚を決めてもらい、Python が保護ルールで必ず補正する。
 
-AI の返事は信用しすぎない: 決められた選択肢以外は捨て、保護対象は AI が何と言っても自動アーカイブしない。
+AI の返事は信用しすぎない: 決められた選択肢以外は捨て、保護対象は AI が何と言っても「アーカイブ候補」にしない。
 """
 import json
 import re
@@ -85,8 +85,24 @@ def ask_ai(mails, now):
     return results
 
 
+SITE_LABEL = "就活サイト"
+CANDIDATE_LABEL = "アーカイブ候補"
+
+
+def decide_site(mail, rules):
+    """就活サイトからのメールなら、その決定（AI は使わない）。違えば None"""
+    site = rules_mod.site_match(rules, mail.get("from_addr"))
+    if not site:
+        return None
+    return {"category": "就活サイト", "protected": False, "vip": None, "star": False,
+            "labels": [SITE_LABEL], "reason": f"就活サイト: {site}"}
+
+
 def decide(mail, ai, rules):
-    """AI の判断と決まりごとから、最終的な棚・保護・アーカイブ可否を決める。"""
+    """AI の判断と決まりごとから、最終的な棚・スター・ラベルを決める。
+
+    🔴 要対応 → スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」ラベル（保護対象には付けない） / 🟡 → 何もしない
+    """
     text = mail["match_text"]
     excepted = rules_mod.match(rules, "except", text)
     vip = rules_mod.match(rules, "vip", text)
@@ -94,7 +110,7 @@ def decide(mail, ai, rules):
     protected = not excepted and (mail["account"] in PROTECTED_ACCOUNTS or vip is not None)
 
     if ai is None:
-        return {"category": "未分類", "protected": protected, "archive": False, "vip": vip,
+        return {"category": "未分類", "protected": protected, "vip": vip, "star": False, "labels": [],
                 "reason": "AIの仕分けに失敗"}
     cat = ai["category"]
     reason = ""
@@ -102,7 +118,6 @@ def decide(mail, ai, rules):
         cat, reason = "広告・通知", f"ミュート: {muted}"
     if protected and RANK[cat] > RANK["確認推奨"]:
         cat, reason = "確認推奨", f"保護: {vip or mail['account']}"
-    if cat == "広告・通知" and ai["confidence"] == "low" and not muted:
-        cat, reason = "参考", "自信が低いので残す"
-    return {"category": cat, "protected": protected, "vip": vip,
-            "archive": cat == "広告・通知" and not protected, "reason": reason}
+    labels = [CANDIDATE_LABEL] if cat in ("参考", "広告・通知") and not protected else []
+    return {"category": cat, "protected": protected, "vip": vip, "star": cat == "要対応",
+            "labels": labels, "reason": reason}

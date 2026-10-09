@@ -6,10 +6,10 @@
   毎朝 8:00      モーニングブリーフ（天気・タスク・メールの仕分け結果・片付いていないもの・昨日のふりかえり）
   毎夕 18:00     イブニングブリーフ（朝以降のメール・まだ片付いていないこと・明日の準備）
 
-  !brief / !mail [時間] / !todo / !inbox / !check
-  未対応の🔴は、ブリーフの最後（と !todo）に番号つきの一覧で出る。番号のリアクション（1️⃣ など）で「済み」、外すと戻る
-  ⏰急ぎ は1通ずつ。✅ で済み（Discord 上の印。Gmail には触らない）
-  !vip / !mute / !except  add <パターン> [呼び名] | remove <パターン> | list
+  !brief / !mail [時間] / !todo（!inbox も同じ） / !check / !retriage
+  未対応の🔴 ＝ 受け皿でスターが付いているメール。ブリーフの最後（と !todo）に番号つきの一覧で出る。
+  番号のリアクション（1️⃣ など）でスターを外す（外すと付け直す）。⏰急ぎ の 🔴 は ✅ で同じ
+  !vip / !mute / !except / !site  add <パターン> [呼び名] | remove <パターン> | list
   !help
 
 Recall（記録係）とは別アプリ・別プロセス。Recall の記録は Nextcloud から読むだけ。
@@ -27,7 +27,7 @@ from discord.ext import tasks
 
 import rules as rules_mod
 import secretary as sec
-from brief import build_brief, build_evening, mail_list, inbox_list
+from brief import build_brief, build_evening, mail_list
 from nc import JST, log, log_date
 
 TOKEN = os.environ["CONCIERGE_DISCORD_TOKEN"]
@@ -46,17 +46,18 @@ LIMIT = 1900
 DONE_EMOJI = "✅"
 NUM_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
               "🇦", "🇧", "🇨", "🇩", "🇪", "🇫", "🇬", "🇭", "🇮", "🇯"]   # 1通に付けられるのは20種類まで
-RULE_KINDS = {"!vip": ("vip", "大事な相手（自動アーカイブしない・最低でも確認推奨）"),
-              "!mute": ("mute", "ミュート（今後アーカイブしてよい。保護対象には効かない）"),
-              "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）")}
+RULE_KINDS = {"!vip": ("vip", "大事な相手（アーカイブ候補にしない・最低でも確認推奨）"),
+              "!mute": ("mute", "ミュート（アーカイブ候補にしてよい。保護対象には効かない）"),
+              "!except": ("except", "保護の例外（大学宛て・VIP でも AI の判断に任せる）"),
+              "!site": ("site", "就活サイトのドメイン（「就活サイト」ラベルだけ付ける）")}
 HELP = ("🛎️ **Concierge**（秘書）\n"
         f"- {POLL_MINUTES}分おきに郵便受けを見て、大学宛て・大事な相手からのメールはすぐ、それ以外は{sec.BATCH_WAIT_MIN}分ごとにまとめて仕分けます。"
         f"毎朝 {BRIEF_TIME:%H:%M} にモーニング、毎夕 {EVENING_TIME:%H:%M} にイブニングブリーフ。今日・明日の締切や予定はすぐお知らせします\n"
-        "- 未対応の🔴はブリーフの最後に番号つきで出ます。片付いたらその番号のリアクション（1️⃣ など）、⏰急ぎは ✅。外すと戻ります\n"
-        "- `!todo` 未対応の🔴の一覧をいつでも\n"
-        "- `!brief` ブリーフ（15時より前は朝の形、以降は夕方の形） / `!mail [時間]` 仕分けたメールの一覧 / `!inbox` 片付いていないもの / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
-        "- `!vip` `!mute` `!except` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`\n"
-        f"- 自動アーカイブ: {'オン' if sec.AUTO_ARCHIVE else 'オフ（ラベルだけ付けています）'}")
+        "- 受け皿の Gmail には付箋だけ: 🔴→⭐スター / 参考・広告・通知→「アーカイブ候補」/ 就活サイト→「就活サイト」（既読・アーカイブはしません）\n"
+        "- 未対応の🔴（スター付き）はブリーフの最後に番号つきで出ます。片付いたら番号のリアクション（1️⃣ など）でスターを外します。Gmail で外しても同じ\n"
+        "- `!todo` 未対応の一覧 / `!brief` ブリーフ（15時より前は朝の形） / `!mail [時間]` 仕分けたメール / `!check` 今すぐ仕分ける / `!usage [日数]` Codex の使用量\n"
+        "- `!retriage` 記録にあるメールを今の決まりで仕分け直す\n"
+        "- `!vip` `!mute` `!except` `!site` + `add <アドレスや名前の一部> [呼び名]` / `remove <…>` / `list`")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -103,62 +104,76 @@ async def react(message, emoji, remove=False):
         pass
 
 
-# ---- 1通ずつのメール（✅ リアクションで済み）----
+# ---- 未対応（スター付き）の一覧と ⏰。リアクションでスターを外す ----
 
 def card_text(rec, head="", done=False):
     body = f"{sec.line(rec, with_age=True)}\n件名: {rec['subject'][:200]}"
     if head:
         body = head + "\n" + body
     if done:
-        return "✅ 済み\n" + "\n".join(f"~~{ln}~~" for ln in body.split("\n"))
+        return "✅ スターを外しました\n" + "\n".join(f"~~{ln}~~" for ln in body.split("\n"))
     return body
 
 
 async def send_card(rec, head=""):
-    msg = await (await channel()).send(card_text(rec, head))
-    await asyncio.to_thread(sec.remember_message, msg.id, rec["uid"])
-    await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
+    msg = await (await channel()).send(card_text(rec, head) + ("\n（片付いたら ✅）" if rec.get("star") else ""))
+    if rec.get("star") and rec.get("gmid"):
+        await asyncio.to_thread(sec.remember_message, msg.id, rec["gmid"])
+        await react(msg, DONE_EMOJI)   # 押す場所の目印（bot 自身のリアクションは無視する）
     return msg
 
 
-def board_text(recs, done_ids):
-    lines = ["🔴 **未対応のメール**（片付いたら番号のリアクション。外すと戻る）"]
-    for emo, rec in zip(NUM_EMOJIS, recs):
-        ln = f"{emo} {sec.line(rec, with_age=True)[2:]}"
-        lines.append(f"~~{ln}~~ ✅" if str(rec["uid"]) in done_ids else ln)
-    return "\n".join(lines)[:LIMIT]
+BOARD_HEAD = "⭐ **未対応のメール**（スター付き。片付いたら番号のリアクションでスターを外す）"
 
 
 async def send_board(empty_text=None):
-    """未対応の🔴を番号つきの一覧1通で送り、番号のリアクションを付ける（古い順・20件まで）"""
-    items = await asyncio.to_thread(sec.todo_items)
+    """スター付きを番号つきの一覧1通で送り、番号のリアクションを付ける（古い順・20件まで）"""
+    try:
+        items = await asyncio.to_thread(sec.starred_items)
+    except Exception as e:  # noqa: BLE001
+        log(f"NG starred: {e!r}")
+        await send_long(f"⚠️ スター付きのメールを確認できませんでした: `{str(e)[:200]}`")
+        return
     if not items:
         if empty_text:
             await send_long(empty_text)
         return
     recs = items[:len(NUM_EMOJIS)]
-    text = board_text(recs, set())
+    lines = [BOARD_HEAD] + [f"{emo} {sec.line(r, with_age=True)[2:]}" for emo, r in zip(NUM_EMOJIS, recs)]
+    text = "\n".join(lines)[:LIMIT]
     if len(items) > len(recs):
         text += f"\n…ほか {len(items) - len(recs)} 件（減らしてから `!todo`）"
     msg = await (await channel()).send(text)
-    await asyncio.to_thread(sec.remember_board, msg.id, [r["uid"] for r in recs])
+    await asyncio.to_thread(sec.remember_board, msg.id, [r["gmid"] for r in recs])
     for emo in NUM_EMOJIS[:len(recs)]:
         await react(msg, emo)
 
 
-async def on_board_reaction(payload, uids, done):
+def _toggle_line(content, idx, done):
+    """一覧の idx 番目（0始まり）の行に取り消し線を付ける／外す"""
+    lines = content.split("\n")
+    i = idx + 1
+    if i < len(lines):
+        ln = re.sub(r"^~~(.*)~~ ✅$", r"\1", lines[i])
+        lines[i] = f"~~{ln}~~ ✅" if done else ln
+    return "\n".join(lines)
+
+
+async def on_board_reaction(payload, gmids, done):
     emo = str(payload.emoji)
-    if emo not in NUM_EMOJIS or NUM_EMOJIS.index(emo) >= len(uids):
+    if emo not in NUM_EMOJIS or NUM_EMOJIS.index(emo) >= len(gmids):
         return
-    uid = uids[NUM_EMOJIS.index(emo)]
-    await asyncio.to_thread(sec.set_done, uid, done)
-    log(f"{'DONE' if done else 'UNDO'} uid={uid}（一覧）")
+    idx = NUM_EMOJIS.index(emo)
+    try:
+        ok = await asyncio.to_thread(sec.set_star, gmids[idx], not done)
+    except Exception as e:  # noqa: BLE001
+        log(f"NG star {gmids[idx]}: {e!r}")
+        await send_long(f"⚠️ スターを{'外せ' if done else '付けられ'}ませんでした: `{str(e)[:200]}`")
+        return
+    log(f"{'UNSTAR' if done else 'STAR'} gmid={gmids[idx]}（一覧）{'' if ok else ' 見つからず'}")
     try:
         msg = await (await channel()).fetch_message(payload.message_id)
-        recs = [r for r in (await asyncio.gather(*(asyncio.to_thread(sec.get_record, u) for u in uids)))]
-        done_ids = await asyncio.to_thread(sec.done_uids)
-        tail = "\n…" + msg.content.split("\n…", 1)[1] if "\n…" in msg.content else ""
-        await msg.edit(content=board_text([r for r in recs if r], done_ids) + tail)
+        await msg.edit(content=_toggle_line(msg.content, idx, done))
     except discord.HTTPException:
         pass
 
@@ -166,23 +181,28 @@ async def on_board_reaction(payload, uids, done):
 async def on_card_reaction(payload, done):
     if payload.channel_id != CHANNEL_ID or payload.user_id not in ALLOWED_USER_IDS:
         return
-    uids = await asyncio.to_thread(sec.board_for_message, payload.message_id)
-    if uids:
-        await on_board_reaction(payload, uids, done)
+    gmids = await asyncio.to_thread(sec.board_for_message, payload.message_id)
+    if gmids:
+        await on_board_reaction(payload, gmids, done)
         return
     if str(payload.emoji) != DONE_EMOJI:
         return
-    uid = await asyncio.to_thread(sec.uid_for_message, payload.message_id)
-    if uid is None:
+    gmid = await asyncio.to_thread(sec.gmid_for_message, payload.message_id)
+    if gmid is None:
         return
-    await asyncio.to_thread(sec.set_done, uid, done)
-    log(f"{'DONE' if done else 'UNDO'} uid={uid}")
+    try:
+        await asyncio.to_thread(sec.set_star, gmid, not done)
+    except Exception as e:  # noqa: BLE001
+        log(f"NG star {gmid}: {e!r}")
+        return
+    log(f"{'UNSTAR' if done else 'STAR'} gmid={gmid}（⏰）")
     try:
         msg = await (await channel()).fetch_message(payload.message_id)
-        rec = await asyncio.to_thread(sec.get_record, uid)
+        rec = (await asyncio.to_thread(sec.find_by_gmid, [gmid]))[0]
         if rec:
             m = re.search(r"⏰ \*\*急ぎ\*\*（[^）]*）", msg.content or "")
-            await msg.edit(content=card_text(rec, m.group(0) if m else "", done))
+            await msg.edit(content=card_text(rec, m.group(0) if m else "", done)
+                           + ("" if done else "\n（片付いたら ✅）"))
     except discord.HTTPException:
         pass
 
@@ -333,8 +353,20 @@ async def on_message(message):
         if cmd in RULE_KINDS:
             words[0] = cmd
             await message.reply(await asyncio.to_thread(rule_command, words), mention_author=False)
-        elif cmd == "!todo":
-            await send_board(empty_text="✨ 未対応の🔴はありません")
+        elif cmd in ("!todo", "!inbox"):
+            await send_board(empty_text="✨ スター付き（未対応）のメールはありません")
+        elif cmd == "!retriage":
+            await react(message, "⏳")
+            async with _lock:
+                out = await asyncio.to_thread(sec.retriage)
+            n = len(out["processed"])
+            by = {}
+            for r in out["processed"]:
+                by[r["category"]] = by.get(r["category"], 0) + 1
+            await message.reply(f"🔁 {n}通を仕分け直しました（以前の Concierge/… ラベルは外しました）\n"
+                                + " / ".join(f"{sec.SHELF_ICON.get(c, '')}{c} {k}" for c, k in by.items()),
+                                mention_author=False)
+            await react(message, "⏳", remove=True)
         elif cmd == "!usage":
             days = int(words[1]) if len(words) > 1 and words[1].isdigit() else 1
             await message.reply(await asyncio.to_thread(usage_summary, days), mention_author=False)
@@ -342,7 +374,7 @@ async def on_message(message):
             await react(message, "⏳")
             await check_mail(report_empty=True, force=True)
             await react(message, "⏳", remove=True)
-        elif cmd in ("!brief", "!mail", "!inbox"):
+        elif cmd in ("!brief", "!mail"):
             await react(message, "⏳")
             if cmd == "!brief":
                 await check_mail(force=True)
@@ -356,12 +388,8 @@ async def on_message(message):
                 await send_board()
                 await react(message, "⏳", remove=True)
                 return
-            elif cmd == "!mail":
-                hours = int(words[1]) if len(words) > 1 and words[1].isdigit() else 24
-                text = await asyncio.to_thread(mail_list, min(hours, 24 * 30))
-            else:
-                async with _lock:
-                    text = await asyncio.to_thread(inbox_list)
+            hours = int(words[1]) if len(words) > 1 and words[1].isdigit() else 24
+            text = await asyncio.to_thread(mail_list, min(hours, 24 * 30))
             await send_long(text, reply_to=message)
             await react(message, "⏳", remove=True)
         else:
@@ -375,7 +403,7 @@ async def on_message(message):
 @client.event
 async def on_ready():
     log(f"Concierge ready as {client.user} (channel={CHANNEL_ID}, brief={BRIEF_TIME:%H:%M}/{EVENING_TIME:%H:%M}, "
-        f"poll={POLL_MINUTES}min, auto_archive={sec.AUTO_ARCHIVE})")
+        f"poll={POLL_MINUTES}min)")
     if not poll_mail.is_running():
         poll_mail.start()
     if not morning_brief.is_running():

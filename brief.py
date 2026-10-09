@@ -40,21 +40,24 @@ def mail_materials():
     by = {c: [r for r in new if r["category"] == c] for c in sec.SHELF_ICON}
     ads = by["広告・通知"]
     senders = Counter(r["from"].split("<")[0].strip().strip('"')[:16] for r in ads).most_common(4)
-    done = sec.done_uids()
     lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
-             f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)}" + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    # 🔴 は bot がブリーフの最後に一覧（✅ で済みにできる）を付けるので、ここでは件数だけ渡す
-    lines += [sec.line(r) for r in by["確認推奨"] if str(r["uid"]) not in done]
+             f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)} / 💼就活サイト {len(by['就活サイト'])}"
+             + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
+    # 🔴 は bot がブリーフの最後に一覧（リアクションでスターを外せる）を付けるので、ここでは件数だけ渡す
+    lines += [sec.line(r) for r in by["確認推奨"]]
     if ads:
         lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
-                     + ("（自動アーカイブ済み）" if sec.AUTO_ARCHIVE else "（ラベルのみ。受信トレイに残っています）"))
-    todo = sec.todo_items()
-    new_ids = {r["uid"] for r in new}
-    oldest = max(((datetime.now(JST).date() - datetime.fromisoformat(r["date"]).date()).days
-                  for r in todo if r.get("date")), default=0)
-    lines.append(f"\n未対応の🔴要対応: {len(todo)}件（うち新着 {sum(r['uid'] in new_ids for r in todo)}件）"
-                 + (f"、いちばん古いものは{oldest}日目" if oldest >= 2 else "")
-                 + "。中身はブリーフの最後に一覧で付く")
+                     + "（受け皿の Gmail で「アーカイブ候補」ラベル）")
+    todo = _safe(sec.starred_items, default=None)
+    if todo is None:
+        lines.append("\n未対応の🔴要対応（スター付き）: （確認できませんでした）")
+    else:
+        new_g = {r.get("gmid") for r in new}
+        oldest = max(((datetime.now(JST).date() - datetime.fromisoformat(r["date"]).date()).days
+                      for r in todo if r.get("date")), default=0)
+        lines.append(f"\n未対応の🔴要対応（スター付き）: {len(todo)}件（うち新着 {sum(r.get('gmid') in new_g for r in todo)}件）"
+                     + (f"、いちばん古いものは{oldest}日目" if oldest >= 2 else "")
+                     + "。中身はブリーフの最後に一覧で付く")
     events = [r for r in st["records"].values() if r.get("event")]
     lines.append("\nメールにあった予定（直近）:")
     lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
@@ -124,16 +127,10 @@ def mail_list(hours=24):
         return f"📭 直近{hours}時間に仕分けたメールはありません"
     head = f"📬 直近{hours}時間のメール {len(recs)}通"
     ads = [r for r in recs if r["category"] == "広告・通知"]
-    body = [sec.line(r) for r in recs if r["category"] != "広告・通知"]
+    sites = [r for r in recs if r["category"] == "就活サイト"]
+    body = [sec.line(r) for r in recs if r["category"] not in ("広告・通知", "就活サイト")]
     if ads:
         body.append(f"🗑 広告・通知 {len(ads)}通")
+    if sites:
+        body.append(f"💼 就活サイト {len(sites)}通")
     return head + "\n" + "\n".join(body)
-
-
-def inbox_list():
-    """!inbox: 片付いていない 🔴🟡"""
-    items = sec.open_items()
-    if not items:
-        return "✨ 片付いていない要対応・確認推奨はありません"
-    return "📥 **片付いていないメール**（受け皿の受信トレイに残っているもの）\n" + \
-        "\n".join(sec.line(r, with_age=True) for r in items)

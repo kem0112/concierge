@@ -1,13 +1,70 @@
 {
-  "_説明": "初回起動時に state/rules.json へコピーされる。以後の変更は Discord の !vip / !mute / !except で行う（このファイルは初期値）",
+  "_説明": "初回起動時に state/rules.json へコピーされる。以後の変更は Discord の !vip / !mute / !except / !site で行う（このファイルは初期値。新しく増えた種類だけは、state に無ければここから補う）",
   "vip": [
-    {"pattern": "jsol@saiyo.jp", "name": "JSOL（選考）"},
-    {"pattern": "tcsjapan.noreply@saiyo.jp", "name": "日本TCS（選考）"},
-    {"pattern": "reel_graduate@googlegroups.com", "name": "REELのメーリス"},
-    {"pattern": "kyoto-u.ac.jp", "name": "京大"}
+    {
+      "pattern": "jsol@saiyo.jp",
+      "name": "JSOL（選考）"
+    },
+    {
+      "pattern": "tcsjapan.noreply@saiyo.jp",
+      "name": "日本TCS（選考）"
+    },
+    {
+      "pattern": "reel_graduate@googlegroups.com",
+      "name": "REELのメーリス"
+    },
+    {
+      "pattern": "kyoto-u.ac.jp",
+      "name": "京大"
+    }
   ],
   "except": [
-    {"pattern": "水野", "name": "水野さん（高頻度・AI判断に任せる）"}
+    {
+      "pattern": "水野",
+      "name": "水野さん（高頻度・AI判断に任せる）"
+    }
   ],
-  "mute": []
+  "mute": [],
+  "site": [
+    {
+      "pattern": "typeshukatsu.jp",
+      "name": "type就活"
+    },
+    {
+      "pattern": "gaishishukatsu.com",
+      "name": "外資就活ドットコム"
+    },
+    {
+      "pattern": "onecareer.jp",
+      "name": "ワンキャリア"
+    },
+    {
+      "pattern": "slogan.jp",
+      "name": "Goodfind"
+    },
+    {
+      "pattern": "en-courage.com",
+      "name": "エンカレッジ"
+    },
+    {
+      "pattern": "offerbox.jp",
+      "name": "OfferBox"
+    },
+    {
+      "pattern": "i-plug.co.jp",
+      "name": "OfferBox"
+    },
+    {
+      "pattern": "ibeck.co.jp",
+      "name": "Alternative interns"
+    },
+    {
+      "pattern": "syukatsu-kaigi.jp",
+      "name": "就活会議"
+    },
+    {
+      "pattern": "openwork.jp",
+      "name": "OpenWork"
+    }
+  ]
 }

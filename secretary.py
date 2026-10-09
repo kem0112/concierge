@@ -1,8 +1,10 @@
 """秘書の仕事: 郵便受けを覗いて、未処理のメールを全部仕分ける。
 
   - 未処理は UID で管理（state/mail.json）。pk-206 が止まっていても、再開時に溜まった分から全部処理する
-  - ラベル: Concierge/<棚>、宛先/<アカウント>
-  - 自動アーカイブは CONCIERGE_AUTO_ARCHIVE=1 のときだけ（最初の1週間はラベルだけで精度を見る）
+  - 受け皿の Gmail にするのは「付箋」だけ（既読・アーカイブ・削除はしない）:
+      🔴 要対応 → ⭐ スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」/ 就活サイト → 「就活サイト」（AI は使わない）
+      全部のメールに 宛先/<アカウント>
+  - 未対応の 🔴 ＝ 受け皿でスターが付いているメール（自分で付けたものも含む）。スターを外せば片付いたことになる
   - 今日・明日の締切/予定は即時通知の候補として返す
   - 「やること」があるメールは /ob/Concierge/預かりタスク.md に預かる
 """
@@ -18,17 +20,16 @@ from nc import JST, HELD_TASKS_MD, get_text, put_text, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state", "mail.json")
-# 「済み」の印（Discord の ✅ リアクションで付ける。Gmail には触らない）と、どの Discord メッセージがどのメールか。
-# 仕分けの処理（mail.json）と書き込みがぶつからないよう別ファイル
+# どの Discord メッセージがどのメールか（リアクションでスターを外すため）。仕分けの処理とぶつからないよう別ファイル
 DONE_PATH = os.path.join(HERE, "state", "done.json")
 _done_lock = threading.Lock()
 KEEP_DAYS = 60
 FIRST_RUN_DAYS = 3
-AUTO_ARCHIVE = os.environ.get("CONCIERGE_AUTO_ARCHIVE", "0") == "1"
 # Codex に渡すのは、まとめて（呼び出し回数を減らす）。ただし大学宛て・VIP のメールが来ていたら、すぐ仕分ける
 BATCH_WAIT_MIN = int(os.environ.get("CONCIERGE_BATCH_WAIT_MIN", "60"))
 BATCH_MAX = 10
-SHELF_ICON = {"要対応": "🔴", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "未分類": "❓"}
+SHELF_ICON = {"要対応": "🔴", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "就活サイト": "💼", "未分類": "❓"}
+OLD_LABELS = [f"Concierge/{c}" for c in ("要対応", "確認推奨", "参考", "広告・通知", "未分類")]   # 以前のラベル（仕分け直しで外す）
 
 
 # ---- 状態 ----
@@ -96,6 +97,61 @@ def urgent_reason(rec, ai, today):
 
 # ---- 1回分の処理 ----
 
+def _apply(mb, st, mail, d, ai, now, out):
+    """決定 d を受け皿の Gmail（ラベル・スター）と記録に反映する"""
+    rec = {k: mail[k] for k in ("uid", "gmid", "msgid", "date", "account", "from", "subject")}
+    rec.update({"category": d["category"], "protected": d["protected"], "vip": d["vip"], "star": d["star"],
+                "reason": d["reason"], "summary": (ai or {}).get("summary", ""),
+                "deadline": (ai or {}).get("deadline"), "event": (ai or {}).get("event"),
+                "processed_at": now.isoformat()})
+    try:
+        mb.add_labels(mail["uid"], [f"宛先/{mail['account']}"] + d["labels"])
+        if d["star"]:
+            mb.star(mail["uid"])
+    except Exception as e:  # noqa: BLE001
+        log(f"NG label/star uid={mail['uid']}: {e!r}")
+    if d["category"] == "未分類":
+        out["failed"] += 1
+    st["records"][str(mail["uid"])] = rec
+    st["pending_since"].pop(str(mail["uid"]), None)
+    out["processed"].append(rec)
+    return rec
+
+
+def retriage():
+    """記録にある（受信トレイに残っている）メールを、今の決まりで仕分け直す。以前のラベルは外す。⏰ は出さない"""
+    st = load_state()
+    rules = rules_mod.load()
+    now = datetime.now(JST)
+    out = {"processed": [], "urgent": [], "held": [], "failed": 0, "waiting": 0}
+    with Mailbox() as mb:
+        if mb.uidvalidity != st["uidvalidity"]:
+            return out
+        old = dict(st["records"])
+        mails = [m for m in (mb.fetch(int(u)) for u in sorted(old, key=int)) if m]
+        for m in mails:
+            try:
+                mb.remove_labels(m["uid"], OLD_LABELS)
+            except Exception as e:  # noqa: BLE001
+                log(f"NG remove old labels uid={m['uid']}: {e!r}")
+        others = []
+        for m in mails:
+            d = triage.decide_site(m, rules)
+            if d:
+                _apply(mb, st, m, d, None, now, out)
+            else:
+                others.append(m)
+        ais = triage.ask_ai(others, now) if others else []
+        for m, ai in zip(others, ais):
+            _apply(mb, st, m, triage.decide(m, ai, rules), ai, now, out)
+        for rec in out["processed"]:   # 仕分けた日時は元のままにする（ブリーフの「新着」に混ぜない）
+            prev = old.get(str(rec["uid"])) if old else None
+            if prev and prev.get("processed_at"):
+                rec["processed_at"] = prev["processed_at"]
+        save_state(st)
+    log(f"仕分け直し {len(out['processed'])}通（⭐ {sum(r['star'] for r in out['processed'])}）")
+    return out
+
 def run_once(force=False):
     """未処理のメールを仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], held=[line], failed=n, waiting=n)
 
@@ -125,44 +181,36 @@ def run_once(force=False):
             return out
 
         mails = [m for m in (mb.fetch(u) for u in uids) if m]
+        # 待っている間に受信トレイから消えたもの（自分でアーカイブした等）は待つのをやめる
+        alive = {m["uid"] for m in mails}
+        st["pending_since"] = {k: v for k, v in st["pending_since"].items() if int(k) in alive}
+        pairs = []
+        # 就活サイトは差出人で決まるので、待たずに AI なしで処理する
+        sites = {m["uid"]: triage.decide_site(m, rules) for m in mails}
+        for mail in [m for m in mails if sites[m["uid"]]]:
+            _apply(mb, st, mail, sites[mail["uid"]], None, now, out)
+        mails = [m for m in mails if not sites[m["uid"]]]
         for m in mails:
             st["pending_since"].setdefault(str(m["uid"]), now.isoformat())
         oldest = min((datetime.fromisoformat(st["pending_since"][str(m["uid"])]) for m in mails), default=now)
         urgent_possible = any(m["account"] in triage.FAST_ACCOUNTS
                               or triage.decide(m, {"category": "参考", "confidence": "high"}, rules)["protected"]
                               for m in mails)
-        if not (force or urgent_possible or len(mails) >= BATCH_MAX
-                or now - oldest >= timedelta(minutes=BATCH_WAIT_MIN)):
+        if mails and not (force or urgent_possible or len(mails) >= BATCH_MAX
+                          or now - oldest >= timedelta(minutes=BATCH_WAIT_MIN)):
             out["waiting"] = len(mails)
-            save_state(st)
-            return out
-        ais = triage.ask_ai(mails, now)
-        pairs = []
+            mails = []
+        ais = triage.ask_ai(mails, now) if mails else []
         for mail, ai in zip(mails, ais):
-            d = triage.decide(mail, ai, rules)
-            rec = {k: mail[k] for k in ("uid", "msgid", "date", "account", "from", "subject")}
-            rec.update({"category": d["category"], "protected": d["protected"], "vip": d["vip"],
-                        "reason": d["reason"], "summary": (ai or {}).get("summary", ""),
-                        "deadline": (ai or {}).get("deadline"), "event": (ai or {}).get("event"),
-                        "archived": False, "processed_at": now.isoformat()})
-            labels = [f"Concierge/{d['category']}", f"宛先/{mail['account']}"]
-            try:
-                mb.add_labels(mail["uid"], labels)
-                if d["archive"] and AUTO_ARCHIVE:
-                    mb.archive(mail["uid"])
-                    rec["archived"] = True
-            except Exception as e:  # noqa: BLE001
-                log(f"NG label/archive uid={mail['uid']}: {e!r}")
-            if d["category"] == "未分類":
-                out["failed"] += 1
-            st["records"][str(mail["uid"])] = rec
-            st["pending_since"].pop(str(mail["uid"]), None)
-            st["last_uid"] = max(st["last_uid"] or 0, mail["uid"])
-            out["processed"].append(rec)
+            rec = _apply(mb, st, mail, triage.decide(mail, ai, rules), ai, now, out)
             pairs.append((rec, ai))
             reason = urgent_reason(rec, ai, now.date())
             if reason:
                 out["urgent"].append((rec, reason))
+        # まだ仕分けていないメールより後ろへは進めない（待っている間に取りこぼさないため）
+        pending = [int(u) for u in st["pending_since"]]
+        done_max = max([st["last_uid"] or 0] + [r["uid"] for r in out["processed"]])
+        st["last_uid"] = min(done_max, min(pending) - 1) if pending else done_max
         try:
             out["held"] = hold_tasks(pairs)
         except Exception as e:  # noqa: BLE001
@@ -179,39 +227,21 @@ def since_last_brief(st):
     return [r for r in st["records"].values() if r.get("processed_at", "") > since]
 
 
-def open_items(categories=("要対応", "確認推奨")):
-    """まだ受信トレイにある（片付いていない）指定の棚のメール。古い順"""
-    st = load_state()
-    done = done_uids()
-    cands = [r for r in st["records"].values() if r["category"] in categories and str(r["uid"]) not in done]
-    if not cands:
-        return []
-    with Mailbox() as mb:
-        if mb.uidvalidity != st["uidvalidity"]:
-            return []
-        alive = mb.in_inbox([r["uid"] for r in cands])
-    return sorted([r for r in cands if r["uid"] in alive], key=lambda r: r.get("date") or "")
+# ---- 未対応 ＝ スター付き ----
 
-
-# ---- 済み（受け皿の Gmail は開かない前提。片付いたかどうかは Discord の ✅ だけで決める）----
-
-def _load_done():
+def _load_links():
     try:
         with open(DONE_PATH, encoding="utf-8") as f:
             d = json.load(f)
     except (OSError, ValueError):
         d = {}
-    d.setdefault("done", {})       # uid -> 済みにした時刻
-    d.setdefault("messages", {})   # Discord のメッセージID -> uid（⏰ 1通に1件）
-    d.setdefault("boards", {})     # Discord のメッセージID -> [uid, ...]（🔴一覧。番号のリアクションと対応）
+    d.setdefault("messages", {})   # Discord のメッセージID -> gmid（⏰ 1通に1件）
+    d.setdefault("boards", {})     # Discord のメッセージID -> [gmid, ...]（未対応の一覧。番号のリアクションと対応）
     return d
 
 
-def _save_done(d):
-    cutoff = (datetime.now(JST) - timedelta(days=KEEP_DAYS)).isoformat()
-    d["done"] = {k: v for k, v in d["done"].items() if v >= cutoff}
-    d["messages"] = dict(list(d["messages"].items())[-2000:])
-    d["boards"] = dict(list(d["boards"].items())[-200:])
+def _save_links(d):
+    d = {"messages": dict(list(d["messages"].items())[-2000:]), "boards": dict(list(d["boards"].items())[-200:])}
     os.makedirs(os.path.dirname(DONE_PATH), exist_ok=True)
     tmp = DONE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -219,53 +249,51 @@ def _save_done(d):
     os.replace(tmp, DONE_PATH)
 
 
-def done_uids():
-    return set(_load_done()["done"])
-
-
-def set_done(uid, done=True):
+def remember_message(message_id, gmid):
     with _done_lock:
-        d = _load_done()
-        if done:
-            d["done"][str(uid)] = datetime.now(JST).isoformat()
-        else:
-            d["done"].pop(str(uid), None)
-        _save_done(d)
+        d = _load_links()
+        d["messages"][str(message_id)] = gmid
+        _save_links(d)
 
 
-def remember_message(message_id, uid):
+def remember_board(message_id, gmids):
     with _done_lock:
-        d = _load_done()
-        d["messages"][str(message_id)] = uid
-        _save_done(d)
-
-
-def remember_board(message_id, uids):
-    with _done_lock:
-        d = _load_done()
-        d["boards"][str(message_id)] = list(uids)
-        _save_done(d)
+        d = _load_links()
+        d["boards"][str(message_id)] = list(gmids)
+        _save_links(d)
 
 
 def board_for_message(message_id):
-    return _load_done()["boards"].get(str(message_id))
+    return _load_links()["boards"].get(str(message_id))
 
 
-def uid_for_message(message_id):
-    return _load_done()["messages"].get(str(message_id))
+def gmid_for_message(message_id):
+    return _load_links()["messages"].get(str(message_id))
 
 
-def get_record(uid):
-    return load_state()["records"].get(str(uid))
-
-
-def todo_items():
-    """未対応の 🔴: 要対応で、まだ ✅ を付けていないもの（受信トレイかどうかは見ない）。古い順"""
+def starred_items():
+    """未対応の 🔴: 受け皿でスターが付いているメール（自分で付けたものも含む）。古い順"""
     st = load_state()
-    done = done_uids()
-    return sorted([r for r in st["records"].values()
-                   if r["category"] == "要対応" and str(r["uid"]) not in done],
-                  key=lambda r: r.get("date") or "")
+    by_gmid = {r["gmid"]: r for r in st["records"].values() if r.get("gmid")}
+    with Mailbox(all_mail=True) as mb:
+        found = mb.starred()
+    items = []
+    for it in found:
+        rec = by_gmid.get(it["gmid"])
+        items.append(dict(rec) if rec else dict(it, category="要対応", summary="", deadline=None))
+    return sorted(items, key=lambda r: r.get("date") or "")
+
+
+def set_star(gmid, on):
+    """スターを付け外し（Discord のリアクションから）"""
+    with Mailbox(all_mail=True) as mb:
+        return mb.star_gmid(gmid, on)
+
+
+def find_by_gmid(gmids):
+    st = load_state()
+    by_gmid = {r["gmid"]: r for r in st["records"].values() if r.get("gmid")}
+    return [by_gmid.get(g) for g in gmids]
 
 
 def mark_briefed():

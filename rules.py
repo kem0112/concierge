@@ -3,7 +3,8 @@
 照合は「差出人（名前とアドレス）・宛先・CC・List-Id」の文字列に、パターンが含まれるか（大文字小文字は無視）。
   vip     大事な相手。自動アーカイブしない。棚は最低でも「確認推奨」
   except  保護の例外。大学宛て・VIP に当たっても保護せず、AI の判断に任せる（例: 高頻度の事務連絡）
-  mute    今後アーカイブしてよい相手（保護対象には効かない）
+  mute    広告・通知として扱ってよい相手（アーカイブ候補。保護対象には効かない）
+  site    就活サイトのドメイン。差出人のアドレスがこのドメイン（サブドメイン含む）なら「就活サイト」ラベルだけ付ける（AI は使わない）
 """
 import json
 import os
@@ -12,7 +13,7 @@ import shutil
 HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(HERE, "state", "rules.json")
 DEFAULT_PATH = os.path.join(HERE, "config", "rules_default.json")
-KINDS = ("vip", "except", "mute")
+KINDS = ("vip", "except", "mute", "site")
 
 
 def load():
@@ -21,7 +22,24 @@ def load():
         shutil.copy(DEFAULT_PATH, RULES_PATH)
     with open(RULES_PATH, encoding="utf-8") as f:
         data = json.load(f)
+    if any(k not in data for k in KINDS):
+        # 後から増えた種類（site など）は初期値から補って保存する
+        with open(DEFAULT_PATH, encoding="utf-8") as f:
+            default = json.load(f)
+        for k in KINDS:
+            data.setdefault(k, default.get(k, []))
+        save({k: data[k] for k in KINDS})
     return {k: data.get(k, []) for k in KINDS}
+
+
+def site_match(rules, from_addr):
+    """差出人アドレスのドメインが就活サイトなら、そのサイト名"""
+    domain = (from_addr or "").rsplit("@", 1)[-1].lower()
+    for r in rules["site"]:
+        p = r["pattern"].lower().lstrip("@.")
+        if domain == p or domain.endswith("." + p):
+            return r.get("name") or p
+    return None
 
 
 def save(rules):
