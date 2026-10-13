@@ -29,7 +29,7 @@ from discord.ext import tasks
 import rules as rules_mod
 import secretary as sec
 from brief import build_brief, build_evening, mail_list
-from nc import JST, log, log_date
+from nc import JST, DAY_START_HOUR, log, log_date
 
 TOKEN = os.environ["CONCIERGE_DISCORD_TOKEN"]
 CHANNEL_ID = int(os.environ["CONCIERGE_CHANNEL_ID"])
@@ -411,7 +411,7 @@ async def on_message(message):
                 await check_mail(force=True)
                 now = datetime.now(JST)
                 async with _lock:
-                    if 4 <= now.hour < 15:
+                    if DAY_START_HOUR <= now.hour < 15:
                         text = await asyncio.to_thread(build_brief, log_date(now))
                     else:
                         text = await asyncio.to_thread(build_evening, log_date(now))

@@ -19,7 +19,7 @@ WISH_FILES = [f"{RECALL_ROOT}/長期タスク.md", f"{RECALL_ROOT}/やりたい�
 CONCIERGE_ROOT = "/ob/Concierge"
 HELD_TASKS_MD = f"{CONCIERGE_ROOT}/預かりタスク.md"   # 秘書が預かったタスク（メール由来）
 
-DAY_START_HOUR = 4
+DAY_START_HOUR = 6   # Recall と同じ（朝6時より前は前日扱い）
 JST = timezone(timedelta(hours=9))
 WEEKDAYS = "月火水木金土日"
 
