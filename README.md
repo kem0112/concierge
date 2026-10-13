@@ -65,4 +65,5 @@ Discord #concierge: 毎朝のモーニングブリーフ / 返信が要るメー
 
 - `~/.config/concierge/env`（600）: `env.example` 参照
 - `~/concierge/.venv/`: `pip install -r requirements.txt`
-- デプロイ: Mac から `git push pk main` → `~/repos/concierge.git` のフックが `~/concierge` に展開
+- デプロイ: Mac から `git push pk main` → `~/repos/concierge.git` のフックが `~/concierge` に展開し、bot を再起動。pk-206 上では直接編集しない
+- GitHub（控え）へは `git push github main`
