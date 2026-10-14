@@ -15,7 +15,7 @@ JOURNAL_DIR = f"{RECALL_ROOT}/日記"
 # 自分のタスク（Recall が書く）。タスク.md は以前の分類のノート
 TASK_FILES = [f"{RECALL_ROOT}/{n}.md" for n in ("短期タスク", "長期タスク", "開発タスク", "タスク")]
 # ブリーフの「ひとつ思い出す」の元。やりたいこと.md は以前の分類のノート
-WISH_FILES = [f"{RECALL_ROOT}/長期タスク.md", f"{RECALL_ROOT}/やりたいこと.md"]
+WISH_FILES = [f"{RECALL_ROOT}/アイデア.md", f"{RECALL_ROOT}/長期タスク.md", f"{RECALL_ROOT}/やりたいこと.md"]
 CONCIERGE_ROOT = "/ob/Concierge"
 HELD_TASKS_MD = f"{CONCIERGE_ROOT}/預かりタスク.md"   # 秘書が預かったタスク（メール由来）
 
