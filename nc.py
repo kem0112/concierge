@@ -12,10 +12,10 @@ DAV = f"{NC_BASE}/remote.php/dav/files/{NC_USER}"
 
 RECALL_ROOT = "/ob/Recall"
 JOURNAL_DIR = f"{RECALL_ROOT}/日記"
-# 自分のタスク（Recall が書く）。タスク.md は以前の分類のノート
-TASK_FILES = [f"{RECALL_ROOT}/{n}.md" for n in ("短期タスク", "長期タスク", "開発タスク", "タスク")]
-# ブリーフの「ひとつ思い出す」の元。やりたいこと.md は以前の分類のノート
-WISH_FILES = [f"{RECALL_ROOT}/アイデア.md", f"{RECALL_ROOT}/長期タスク.md", f"{RECALL_ROOT}/やりたいこと.md"]
+# 自分のタスク（Recall が書く）
+TASK_FILES = [f"{RECALL_ROOT}/{n}.md" for n in ("短期タスク", "開発タスク")]
+# ブリーフの「ひとつ思い出す」の元
+WISH_FILES = [f"{RECALL_ROOT}/アイデア.md"]
 CONCIERGE_ROOT = "/ob/Concierge"
 
 DAY_START_HOUR = 6   # Recall と同じ（朝6時より前は前日扱い）

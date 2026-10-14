@@ -53,7 +53,7 @@ def yesterday_summary(today):
 
 
 def random_wish():
-    """アイデア（未完了）と、以前の 長期タスク.md・やりたいこと.md から1つ"""
+    """アイデア（未完了）から1つ"""
     text = "\n".join(get_text(p) or "" for p in WISH_FILES)
     items = []
     for ln in text.splitlines():
