@@ -101,7 +101,7 @@ def decide_site(mail, rules):
 def decide(mail, ai, rules):
     """AI の判断と決まりごとから、最終的な棚・スター・ラベルを決める。
 
-    🔴 要対応 → スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」ラベル（保護対象には付けない） / 🟡 → 何もしない
+    ⭐ 要対応 → スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」ラベル（保護対象には付けない） / 🟡 → 何もしない
     """
     text = mail["match_text"]
     excepted = rules_mod.match(rules, "except", text)

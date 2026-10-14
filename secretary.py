@@ -2,11 +2,11 @@
 
   - 未処理は UID で管理（state/mail.json）。pk-206 が止まっていても、再開時に溜まった分から全部処理する
   - 受け皿の Gmail にするのは「付箋」だけ（既読・アーカイブ・削除はしない）:
-      🔴 要対応 → ⭐ スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」/ 就活サイト → 「就活サイト」（AI は使わない）
+      ⭐ 要対応 → スター / ⚪ 参考・🗑 広告・通知 → 「アーカイブ候補」/ 就活サイト → 「就活サイト」（AI は使わない）
       全部のメールに 宛先/<アカウント>
-  - 未対応の 🔴 ＝ 受け皿でスターが付いているメール（自分で付けたものも含む）。スターを外せば片付いたことになる
-  - 今日・明日の締切/予定は即時通知の候補として返す
-  - 「やること」があるメールは /ob/Concierge/預かりタスク.md に預かる
+  - 未対応の ⭐ ＝ 受け皿でスターが付いているメール（自分で付けたものも含む）。スターを外せば片付いたことになる
+  - VIP からの今日・明日の締切/予定だけ、即時通知の候補として返す
+  - メールからタスクは作らない（2026-10-14 に預かりタスクを廃止。ブリーフでは新着全体を文章でまとめるだけ）
 """
 import json
 import os
@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import rules as rules_mod
 import triage
 from gmail_box import Mailbox
-from nc import JST, HELD_TASKS_MD, get_text, put_text, log
+from nc import JST, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state", "mail.json")
@@ -28,7 +28,7 @@ FIRST_RUN_DAYS = 3
 # Codex に渡すのは、まとめて（呼び出し回数を減らす）。ただし大学宛て・VIP のメールが来ていたら、すぐ仕分ける
 BATCH_WAIT_MIN = int(os.environ.get("CONCIERGE_BATCH_WAIT_MIN", "60"))
 BATCH_MAX = 10
-SHELF_ICON = {"要対応": "🔴", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "就活サイト": "💼", "未分類": "❓"}
+SHELF_ICON = {"要対応": "⭐", "確認推奨": "🟡", "参考": "⚪", "広告・通知": "🗑", "就活サイト": "💼", "未分類": "❓"}
 OLD_LABELS = [f"Concierge/{c}" for c in ("要対応", "確認推奨", "参考", "広告・通知", "未分類")]   # 以前のラベル（仕分け直しで外す）
 
 
@@ -58,33 +58,11 @@ def save_state(st):
     os.replace(tmp, STATE_PATH)
 
 
-# ---- 預かりタスク ----
-
-def hold_tasks(items):
-    """items: [(record, ai)] のうち task があるものを 預かりタスク.md に足す。足した行を返す"""
-    lines = []
-    for rec, ai in items:
-        if not ai or not ai.get("task") or rec["category"] not in ("要対応", "確認推奨"):
-            continue
-        due = f" 📅 {ai['deadline']}" if ai.get("deadline") else ""
-        sender = rec["from"].split("<")[0].strip().strip('"')[:20] or rec["from"][:20]
-        lines.append(f"- [ ] {ai['task']}{due} #{rec['account']} （📧 {sender}：{rec['subject'][:40]}）"
-                     f" %%mail:{rec['msgid']}%%")
-    if not lines:
-        return []
-    content = get_text(HELD_TASKS_MD) or "# 預かりタスク\n\nConcierge がメールから預かったタスク。引き受けたら自分のタスクへ移すか、完了にする。\n\n"
-    new = [ln for ln in lines if ln.split("%%")[1] not in content]
-    if new:
-        put_text(HELD_TASKS_MD, content.rstrip("\n") + "\n" + "\n".join(new) + "\n")
-    return new
-
-
 # ---- 急ぎ ----
 
 def urgent_reason(rec, ai, today):
-    if not ai or rec["category"] in ("広告・通知", "未分類"):
-        return None
-    if not rec["protected"] and ai["confidence"] != "high":
+    """VIP からの、今日・明日の締切や予定だけを急ぎにする（それ以外は即時通知しない）"""
+    if not ai or not rec.get("vip") or rec["category"] in ("広告・通知", "未分類"):
         return None
     soon = {today.isoformat(), (today + timedelta(days=1)).isoformat()}
     if ai.get("deadline") in soon:
@@ -123,7 +101,7 @@ def retriage():
     st = load_state()
     rules = rules_mod.load()
     now = datetime.now(JST)
-    out = {"processed": [], "urgent": [], "held": [], "failed": 0, "waiting": 0}
+    out = {"processed": [], "urgent": [], "failed": 0, "waiting": 0}
     with Mailbox() as mb:
         if mb.uidvalidity != st["uidvalidity"]:
             return out
@@ -153,7 +131,7 @@ def retriage():
     return out
 
 def run_once(force=False):
-    """未処理のメールを仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], held=[line], failed=n, waiting=n)
+    """未処理のメールを仕分ける。戻り値: dict(processed=[record], urgent=[(record, reason)], failed=n, waiting=n)
 
     force=False のときは、次のどれかに当たるまで Codex を呼ばずに待つ（郵便受けを見るだけなら Codex は使わない）:
       - 大学宛て・VIP のメールがある（急ぎの可能性）
@@ -163,7 +141,7 @@ def run_once(force=False):
     st = load_state()
     rules = rules_mod.load()
     now = datetime.now(JST)
-    out = {"processed": [], "urgent": [], "held": [], "failed": 0, "waiting": 0}
+    out = {"processed": [], "urgent": [], "failed": 0, "waiting": 0}
     with Mailbox() as mb:
         if st["uidvalidity"] != mb.uidvalidity or st["last_uid"] is None:
             # 初回、または受信トレイの番号が振り直されたとき: 直近数日分だけ処理する
@@ -184,7 +162,6 @@ def run_once(force=False):
         # 待っている間に受信トレイから消えたもの（自分でアーカイブした等）は待つのをやめる
         alive = {m["uid"] for m in mails}
         st["pending_since"] = {k: v for k, v in st["pending_since"].items() if int(k) in alive}
-        pairs = []
         # 就活サイトは差出人で決まるので、待たずに AI なしで処理する
         sites = {m["uid"]: triage.decide_site(m, rules) for m in mails}
         for mail in [m for m in mails if sites[m["uid"]]]:
@@ -203,7 +180,6 @@ def run_once(force=False):
         ais = triage.ask_ai(mails, now) if mails else []
         for mail, ai in zip(mails, ais):
             rec = _apply(mb, st, mail, triage.decide(mail, ai, rules), ai, now, out)
-            pairs.append((rec, ai))
             reason = urgent_reason(rec, ai, now.date())
             if reason:
                 out["urgent"].append((rec, reason))
@@ -211,12 +187,8 @@ def run_once(force=False):
         pending = [int(u) for u in st["pending_since"]]
         done_max = max([st["last_uid"] or 0] + [r["uid"] for r in out["processed"]])
         st["last_uid"] = min(done_max, min(pending) - 1) if pending else done_max
-        try:
-            out["held"] = hold_tasks(pairs)
-        except Exception as e:  # noqa: BLE001
-            log(f"NG hold tasks: {e!r}")
         save_state(st)
-    log(f"仕分け {len(out['processed'])}通（急ぎ {len(out['urgent'])} / 預かり {len(out['held'])} / 未分類 {out['failed']}）")
+    log(f"仕分け {len(out['processed'])}通（急ぎ {len(out['urgent'])} / 未分類 {out['failed']}）")
     return out
 
 
@@ -272,7 +244,7 @@ def gmid_for_message(message_id):
 
 
 def starred_items():
-    """未対応の 🔴: 受け皿でスターが付いているメール（自分で付けたものも含む）。古い順"""
+    """未対応の ⭐: 受け皿でスターが付いているメール（自分で付けたものも含む）。古い順"""
     st = load_state()
     by_gmid = {r["gmid"]: r for r in st["records"].values() if r.get("gmid")}
     with Mailbox(all_mail=True) as mb:

@@ -3,7 +3,7 @@ import random
 import re
 from datetime import date, timedelta
 
-from nc import JOURNAL_DIR, TASK_FILES, HELD_TASKS_MD, WISH_FILES, WEEKDAYS, get_text
+from nc import JOURNAL_DIR, TASK_FILES, WISH_FILES, WEEKDAYS, get_text
 
 TASK_RE = re.compile(r"^\s*- \[ \] (.*)$")
 DUE_RE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
@@ -18,9 +18,9 @@ def _clean(body):
 
 
 def open_tasks_with_due(content=None):
-    """自分のタスク（Recall）と預かりタスク（Concierge）の両方。預かりの方には 📧 が付く"""
+    """Recall のタスク（期日つき・未完了）。メール由来のタスクはもう作らない"""
     if content is None:
-        content = "\n".join(get_text(p) or "" for p in TASK_FILES + [HELD_TASKS_MD])
+        content = "\n".join(get_text(p) or "" for p in TASK_FILES)
     out = []
     for line in content.splitlines():
         m = TASK_RE.match(line)

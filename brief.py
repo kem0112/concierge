@@ -1,9 +1,9 @@
-"""モーニングブリーフ。材料を集めて Codex に1通の読み物にしてもらう。
-メールは秘書がすでに仕分けた結果（棚・要約）を渡す。生の本文は渡さない。
+"""モーニング/イブニングブリーフ（1日の総合ブリーフ）。材料を集めて Codex に1通の読み物にしてもらう。
+メールは秘書が仕分けたときの1行要約を渡し、新着全体を文章でまとめてもらう（生の本文は渡さない）。
+天気の行は Python が作り、そのまま載せてもらう。
 Codex が失敗した日も、材料をそのまま並べた版を返す（届かない日を作らない）。"""
 import re
 from collections import Counter
-from datetime import datetime
 
 import secretary as sec
 from ai import run_codex, load_prompt
@@ -33,36 +33,55 @@ def _cal_section(title, day):
     return f"## {title}\n{_safe(calendar_text, day) or '（取得できず）'}\n\n"
 
 
+MAIL_MATERIAL_MAX = 60   # まとめの材料に渡すメールの上限（多すぎるときは新しい順に）
+
+
+def _sender(r):
+    return r["from"].split("<")[0].strip().strip('"')[:24] or r["from"][:24]
+
+
 def mail_materials():
-    """ブリーフのメール欄の材料（機械的に作る）"""
+    """ブリーフのメール欄の材料。新着全体を AI が文章でまとめる元（1通ずつは並べない）と、⭐ の件数"""
     st = sec.load_state()
-    new = sec.since_last_brief(st)
-    by = {c: [r for r in new if r["category"] == c] for c in sec.SHELF_ICON}
-    ads = by["広告・通知"]
-    senders = Counter(r["from"].split("<")[0].strip().strip('"')[:16] for r in ads).most_common(4)
-    lines = [f"新着（前回のブリーフ以降）: 🔴要対応 {len(by['要対応'])} / 🟡確認推奨 {len(by['確認推奨'])} / "
-             f"⚪参考 {len(by['参考'])} / 🗑広告・通知 {len(ads)} / 💼就活サイト {len(by['就活サイト'])}"
-             + (f" / ❓未分類 {len(by['未分類'])}" if by["未分類"] else "")]
-    # 🔴 は bot がブリーフの最後に一覧（リアクションでスターを外せる）を付けるので、ここでは件数だけ渡す
-    lines += [sec.line(r) for r in by["確認推奨"]]
+    new = sorted(sec.since_last_brief(st), key=lambda r: r.get("date") or "")
+    ads = [r for r in new if r["category"] == "広告・通知"]
+    body = [r for r in new if r["category"] != "広告・通知"][-MAIL_MATERIAL_MAX:]
+    lines = [f"新着（前回のブリーフ以降）: {len(new)}通（うち広告・通知 {len(ads)}通）"]
+    for r in body:
+        star = "⭐ " if r.get("star") else ""
+        kind = "就活サイト" if r["category"] == "就活サイト" else r["account"]
+        lines.append(f"- {star}[{kind}] {_sender(r)}：{r.get('summary') or r['subject'][:60]}")
     if ads:
-        lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders)
-                     + "（受け皿の Gmail で「アーカイブ候補」ラベル）")
+        senders = Counter(_sender(r)[:16] for r in ads).most_common(4)
+        lines.append("広告・通知の主な差出人: " + "、".join(f"{n}({c})" for n, c in senders))
     todo = _safe(sec.starred_items, default=None)
     if todo is None:
-        lines.append("\n未対応の🔴要対応（スター付き）: （確認できませんでした）")
+        lines.append("\n⭐（スター付き・未対応）: （確認できませんでした）")
     else:
-        new_g = {r.get("gmid") for r in new}
-        oldest = max(((datetime.now(JST).date() - datetime.fromisoformat(r["date"]).date()).days
-                      for r in todo if r.get("date")), default=0)
-        lines.append(f"\n未対応の🔴要対応（スター付き）: {len(todo)}件（うち新着 {sum(r.get('gmid') in new_g for r in todo)}件）"
-                     + (f"、いちばん古いものは{oldest}日目" if oldest >= 2 else "")
-                     + "。中身はブリーフの最後に一覧で付く")
-    events = [r for r in st["records"].values() if r.get("event")]
-    lines.append("\nメールにあった予定（直近）:")
-    lines += [f"- {r['event']['date']} {r['event']['what']}（{r['event']['change']}・{r['account']}）"
-              for r in sorted(events, key=lambda r: r["event"]["date"])[-6:]] or ["- なし"]
+        lines.append(f"\n⭐（スター付き・未対応）: {len(todo)}件。中身はブリーフの最後に一覧で付く")
     return "\n".join(lines)
+
+
+def _shift_materials(day):
+    """その日のバイト（カレンダーの数字だけの予定）。天気と予定欄で使う"""
+    from gcal import shifts_on
+    return _safe(shifts_on, day, default=[]) or []
+
+
+def _tonight(today):
+    """イブニング用: 今日このあと始まるバイト（夜勤など）の南区の雨。なければ空"""
+    from datetime import datetime
+    from weather import shift_lines
+    now = datetime.now(JST)
+    later = [(s, e) for s, e, _ in _shift_materials(today) if s > now]
+    if not later:
+        return ""
+    return f"## 今夜のバイトの天気（この行はそのまま載せる）\n{chr(10).join(_safe(shift_lines, later, default=[]) or ['（取得できず）'])}\n\n"
+
+
+def _weather(day):
+    shifts = _shift_materials(day)
+    return _safe(weather_text, day, [(s, e) for s, e, _ in shifts]) or "（取得できず）"
 
 
 def build_evening(today):
@@ -72,10 +91,11 @@ def build_evening(today):
     tasks = tasks_by_window(today, _safe(open_tasks_with_due, default=[]))
     materials = (
         f"## 日付\n{today:%Y-%m-%d}（{WEEKDAYS[today.weekday()]}）\n\n"
-        f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
+        f"## 朝以降に届いたメール（まとめの材料）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
         f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n"
-        f"## 明日の天気\n{_safe(weather_text, tomorrow) or '（取得できず）'}\n\n"
+        f"{_tonight(today)}"
+        f"## 明日の天気（この行はそのまま載せる）\n{_weather(tomorrow)}\n\n"
         f"{_cal_section('明日の予定（Googleカレンダー）', tomorrow)}"
     )
     text = None
@@ -95,11 +115,11 @@ def build_brief(today):
     tasks = tasks_by_window(today, _safe(open_tasks_with_due, default=[]))
     materials = (
         f"## 日付\n{today:%Y-%m-%d}（{WEEKDAYS[today.weekday()]}）\n\n"
-        f"## 天気\n{_safe(weather_text, today) or '（取得できず）'}\n\n"
+        f"## 天気（この行はそのまま載せる）\n{_weather(today)}\n\n"
         f"{_cal_section('今日の予定（Googleカレンダー）', today)}"
         f"## 期日を過ぎたタスク\n{_lst(tasks['overdue'])}\n\n## 今日が期日のタスク\n{_lst(tasks['today'])}\n\n"
         f"## 明日が期日のタスク\n{_lst(tasks['tomorrow'])}\n\n## 今週中（2〜7日後）が期日のタスク\n{_lst(tasks['week'])}\n\n"
-        f"## メール（秘書の仕分け結果）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
+        f"## 前回のブリーフ以降に届いたメール（まとめの材料）\n{_safe(mail_materials) or '（取得できず）'}\n\n"
         f"## 昨日の日記の要約\n{_safe(yesterday_summary, today) or '（昨日の日記はまだありません）'}\n\n"
         f"## アイデアから1つ\n- {_safe(random_wish) or '（まだありません）'}\n"
     )
